@@ -1,0 +1,40 @@
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# --- Frontend (frntEnd) ---
+frntEnd/node_modules/
+frntEnd/dist/
+frntEnd/dist-ssr/
+frntEnd/*.local
+
+# --- Backend (Backend) ---
+Backend/.venv/
+Backend/venv/
+Backend/env/
+Backend/__pycache__/
+Backend/*.py[co]
+Backend/.pytest_cache/
+Backend/.mypy_cache/
+Backend/.ruff_cache/
+Backend/.coverage
+Backend/.env
+Backend/.claude/
+Backend/keys/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Misc
+.env
+.env.local
+node_modules/

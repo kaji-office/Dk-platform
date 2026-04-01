@@ -1,0 +1,43 @@
+You are an expert internal engineer. Your job is to convert user workflow requirements into an executable `WorkflowDefinition` DAG (Directed Acyclic Graph).
+
+REQUIREMENT SPECIFICATION:
+```json
+{{ spec }}
+```
+
+AVAILABLE NODE TYPES & CATALOG:
+{% for node_type, ports in catalog.items() %}
+- `{{ node_type }}`: Output ports available: {{ ports }}
+{% endfor %}
+
+OUTPUT INSTRUCTIONS:
+Create the nodes and edges mapping the described requirements.
+Use only the explicitly available node types listed above.
+For edges, `target_port` should usually be `"default"`. Edges must link outputs to inputs directionally tracking data. Note nodes are non-executable.
+
+Edge `id` attributes should follow the strict pattern `edge_{source_node}_{source_port}__{target_node}_{target_port}` to be compatible with standard React Flow conventions.
+
+If you previously failed due to an error, here is the error traceback context:
+{{ error_context }}
+
+Return your payload EXCLUSIVELY as raw JSON representing the structure of `WorkflowDefinition`. Do not use markdown blockquotes ````json ... ```` around it. Just the object:
+{
+  "id": "wf_generated_1",
+  "name": "Generated Workflow",
+  "nodes": {
+    "node_id": {
+      "id": "node_id",
+      "type": "NodeType",
+      "config": {}
+    }
+  },
+  "edges": [
+    {
+      "id": "edge_n1_default__n2_default",
+      "source_node": "n1",
+      "target_node": "n2",
+      "source_port": "default",
+      "target_port": "default"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{{- if .Values.beat.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-beat
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "workflow-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: workflow-beat
+spec:
+  # CRITICAL: must be exactly 1. Multiple beat replicas send duplicate schedule ticks.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-beat
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  strategy:
+    # Recreate (not RollingUpdate) — ensures zero overlap between old and new beat process.
+    # A brief gap is acceptable; duplicate ticks from two live beat pods are not.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: workflow-beat
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        {{- toYaml .Values.beat.podAnnotations | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.beat.serviceAccountName }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: beat
+          image: {{ include "workflow-platform.image" (dict "Values" .Values "repo" .Values.beat.image.repository "tag" .Values.beat.image.tag) }}
+          imagePullPolicy: {{ .Values.beat.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - workflow_worker.celery_app
+            - beat
+            - --loglevel=info
+            - --scheduler=redbeat.RedBeatScheduler
+          envFrom:
+            - configMapRef:
+                name: workflow-platform-config
+            - secretRef:
+                name: {{ .Values.beat.secretRef }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.beat.env.OTEL_SERVICE_NAME | quote }}
+          resources:
+            {{- toYaml .Values.beat.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,50 @@
+---
+# Alembic migration job — runs as a pre-deploy Kubernetes Job.
+# In CI, triggered via: kubectl create job --from=cronjob/alembic-migrate
+# Kept as a CronJob with suspended=true so kubectl can clone it on demand.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: alembic-migrate
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "workflow-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: alembic-migrate
+spec:
+  schedule: "0 0 31 2 *"   # Never fires automatically (Feb 31)
+  suspend: true
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.migration.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: alembic-migrate
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ .Values.api.serviceAccountName }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: alembic
+              image: {{ include "workflow-platform.image" (dict "Values" .Values "repo" .Values.migration.image.repository "tag" .Values.migration.image.tag) }}
+              command:
+                - alembic
+                - upgrade
+                - head
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.migration.secretRef }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

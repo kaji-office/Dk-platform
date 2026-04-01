@@ -1,0 +1,26 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "aioboto", "aioredis", "alembic", "anthropic", "appuser", "asyncio",
+    "asyncpg", "authlib",
+    "autoescaping", "bcrypt", "celery", "croniter", "dataclass", "datetime",
+    "conftest", "dockerfiles", "fastapi", "firecracker", "flowtype", "gvisor",
+    "haiku", "hatchling", "httpx", "importlinter", "inlines", "ivfflat",
+    "jinja", "jmespath", "jsonschema",
+    "kombu", "localstack", "loguru", "maxsurge", "mcp", "mongo", "mongosh",
+    "motor", "mypy", "mypy", "openai", "opentelemetry", "otlp", "otel",
+    "pgvector", "pii", "presign", "presidio", "pyotp", "pyproject", "pytest", "pytz",
+    "pydantic", "ratelimit", "redis", "rerank", "reraise", "ruff",
+    "sandboxed", "sdk", "sendgrid", "serialisable", "serpapi", "slowapi",
+    "colour", "colours", "deserialise", "rgba", "serialise", "sess", "smoothstep",
+    "sonnet", "soql", "subworkflow", "tiktoken", "toml", "topo", "totp",
+    "uvicorn", "vertex", "worktree", "xray"
+  ],
+  "ignorePaths": [
+    ".git/**",
+    "node_modules/**",
+    "*.lock",
+    "*.sql"
+  ]
+}

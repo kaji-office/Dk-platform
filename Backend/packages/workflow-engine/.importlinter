@@ -1,0 +1,102 @@
+[importlinter]
+root_packages =
+    workflow_engine
+include_external_packages = True
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SDK Layer Contracts
+#
+# Layer order (strict, top-to-bottom):
+#   A → Models / Domain types      (no internal imports)
+#   B → Structural                 (imports A only)
+#   C → Runtime                    (imports A, B)
+#   D → Platform Services          (imports A, B, C)
+#
+# Delivery packages (workflow_api, workflow_worker, workflow_cli) may import
+# from any SDK layer — they sit above D.  They are NOT checked here (they have
+# their own pyproject.toml and are outside this root).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Contract 1: Layer A has no internal imports ───────────────────────────────
+[contract: sdk-layer-a-no-internal-imports]
+type = forbidden
+source_modules =
+    workflow_engine.models
+    workflow_engine.ports
+    workflow_engine.errors
+forbidden_modules =
+    workflow_engine.graph
+    workflow_engine.nodes
+    workflow_engine.execution
+    workflow_engine.scheduler
+    workflow_engine.auth
+    workflow_engine.billing
+    workflow_engine.connectors
+    workflow_engine.storage
+    workflow_engine.cache
+    workflow_engine.observability
+    workflow_engine.pii
+    workflow_engine.sandbox
+
+
+# ── Contract 2: Layer B imports only from Layer A ─────────────────────────────
+[contract: sdk-layer-b-imports-a-only]
+type = layers
+layers =
+    workflow_engine.graph
+    workflow_engine.nodes
+    |
+    workflow_engine.models
+    workflow_engine.ports
+    workflow_engine.errors
+containers =
+    workflow_engine
+
+
+# ── Contract 3: Layer C may import A and B, not D ─────────────────────────────
+[contract: sdk-layer-c-no-d-imports]
+type = forbidden
+source_modules =
+    workflow_engine.execution
+    workflow_engine.scheduler
+forbidden_modules =
+    workflow_engine.auth
+    workflow_engine.billing
+    workflow_engine.connectors
+    workflow_engine.storage
+    workflow_engine.cache
+    workflow_engine.observability
+    workflow_engine.pii
+    workflow_engine.sandbox
+
+
+# ── Contract 4: No circular imports anywhere in the SDK ───────────────────────
+[contract: sdk-no-circular]
+type = independence
+modules =
+    workflow_engine.models
+    workflow_engine.ports
+    workflow_engine.errors
+    workflow_engine.graph
+    workflow_engine.nodes
+    workflow_engine.execution
+    workflow_engine.scheduler
+    workflow_engine.auth
+    workflow_engine.billing
+    workflow_engine.connectors
+    workflow_engine.storage
+    workflow_engine.cache
+    workflow_engine.observability
+    workflow_engine.pii
+    workflow_engine.sandbox
+
+
+# ── Contract 5: SDK must never import delivery packages ───────────────────────
+[contract: sdk-no-delivery-imports]
+type = forbidden
+source_modules =
+    workflow_engine
+forbidden_modules =
+    workflow_api
+    workflow_worker
+    workflow_cli

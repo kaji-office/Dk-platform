@@ -1,0 +1,80 @@
+{{- if .Values.api.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "workflow-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: workflow-api
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "workflow-platform.api.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: {{ .Values.api.updateStrategy.type }}
+    {{- if eq .Values.api.updateStrategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ .Values.api.updateStrategy.rollingUpdate.maxUnavailable }}
+      maxSurge: {{ .Values.api.updateStrategy.rollingUpdate.maxSurge }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "workflow-platform.api.selectorLabels" . | nindent 8 }}
+        {{- include "workflow-platform.labels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.api.podAnnotations | nindent 8 }}
+        # Force pod restart when secret changes
+        checksum/secret: {{ .Values.api.secretRef | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.api.serviceAccountName }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: {{ include "workflow-platform.image" (dict "Values" .Values "repo" .Values.api.image.repository "tag" .Values.api.image.tag) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: workflow-platform-config
+            - secretRef:
+                name: {{ .Values.api.secretRef }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.api.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.api.readinessProbe | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: workflow-api
+                topologyKey: kubernetes.io/hostname
+{{- end }}

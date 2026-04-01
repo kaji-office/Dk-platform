@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workflow-worker"
+version = "1.0.0"
+description = "AI Workflow Builder — Celery Worker (Thin delivery layer)"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "workflow-engine>=1.0.0",      # The SDK — all execution logic lives here
+
+    # Task queue
+    "celery[redis]>=5.4,<6",
+    "redis>=5.0,<6",
+    "kombu>=5.3,<6",
+
+    # Database clients
+    "motor>=3.4,<4",
+    "aioredis>=2.0,<3",
+    "asyncpg>=0.29,<1",
+
+    # AWS
+    "aioboto3>=12.0,<13",
+    "aws-xray-sdk>=2.12,<3",
+
+    # Monitoring
+    "flower>=2.0,<3",              # Celery monitoring UI
+    "prometheus-client>=0.20,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/workflow_worker"]
+
+[project.scripts]
+workflow-worker = "workflow_worker.celery_app:app"

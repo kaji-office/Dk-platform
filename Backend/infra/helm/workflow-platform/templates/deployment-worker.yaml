@@ -1,0 +1,75 @@
+{{- if .Values.worker.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workflow-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "workflow-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/name: workflow-worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "workflow-platform.worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "workflow-platform.worker.selectorLabels" . | nindent 8 }}
+        {{- include "workflow-platform.labels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.worker.podAnnotations | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.worker.serviceAccountName }}
+      terminationGracePeriodSeconds: 60   # allow in-flight tasks to drain
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: worker
+          image: {{ include "workflow-platform.image" (dict "Values" .Values "repo" .Values.worker.image.repository "tag" .Values.worker.image.tag) }}
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - workflow_worker.celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency={{ .Values.worker.concurrency }}
+            - -Q
+            - {{ .Values.worker.queues }}
+          envFrom:
+            - configMapRef:
+                name: workflow-platform-config
+            - secretRef:
+                name: {{ .Values.worker.secretRef }}
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.worker.env.OTEL_SERVICE_NAME | quote }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.worker.livenessProbe | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: workflow-worker
+                topologyKey: kubernetes.io/hostname
+{{- end }}

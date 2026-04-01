@@ -1,0 +1,16 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workflow-platform-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "workflow-platform.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.global.environment | quote }}
+  AWS_REGION: {{ .Values.global.awsRegion | quote }}
+  LOG_LEVEL: {{ .Values.api.env.LOG_LEVEL | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.api.env.OTEL_SERVICE_NAME | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  WORKERS: {{ .Values.api.env.WORKERS | quote }}
+  WORKER_CLASS: {{ .Values.api.env.WORKER_CLASS | quote }}

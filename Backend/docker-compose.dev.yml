@@ -1,0 +1,135 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI Workflow Builder — Local Development Stack
+# Usage: make dev   (or: docker compose -f docker-compose.dev.yml up -d)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── MongoDB ───────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: wf_mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: workflow_platform
+    volumes:
+      - mongo_data:/data/db
+      - ./infra/database/mongodb/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wf_network
+
+  # ── PostgreSQL + pgvector ─────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: wf_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: workflow_platform
+      POSTGRES_USER: workflow
+      POSTGRES_PASSWORD: devpassword
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/database/postgres/migrations/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wf_network
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: wf_redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wf_network
+
+  # ── LocalStack (S3 emulation) ─────────────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3
+    container_name: wf_localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3
+      AWS_DEFAULT_REGION: us-east-1
+      LOCALSTACK_HOST: localhost
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal s3 ls 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - wf_network
+
+  # ── Flower (Celery monitoring) ────────────────────────────────────────────
+  flower:
+    image: mher/flower:2.0.1
+    container_name: wf_flower
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      FLOWER_PORT: 5555
+      FLOWER_BASIC_AUTH: admin:devpassword
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - wf_network
+
+  # ── Mongo Express (MongoDB UI) ────────────────────────────────────────────
+  mongo-express:
+    image: mongo-express:1
+    container_name: wf_mongo_express
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: devpassword
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - wf_network
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+volumes:
+  mongo_data:
+  pg_data:
+  redis_data:
+  localstack_data:
+
+networks:
+  wf_network:
+    driver: bridge

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: workflow-platform
+description: AI Workflow Builder — API + Worker services
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+
+maintainers:
+  - name: Platform Engineering
+
+keywords:
+  - workflow
+  - ai
+  - automation

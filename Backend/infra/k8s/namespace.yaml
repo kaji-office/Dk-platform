@@ -1,0 +1,19 @@
+---
+# Staging namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workflow-staging
+  labels:
+    environment: staging
+    team: platform
+
+---
+# Production namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workflow-production
+  labels:
+    environment: production
+    team: platform

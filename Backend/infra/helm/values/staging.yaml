@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Staging environment overrides
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  environment: staging
+  awsRegion: us-east-1
+
+namespace: workflow-staging
+
+api:
+  replicaCount: 2
+
+  ingress:
+    host: api-staging.workflowplatform.io
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/healthcheck-path: /v1/health
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/STAGING_CERT_ID
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  hpa:
+    minReplicas: 2
+    maxReplicas: 6
+
+  iamRoleArn: arn:aws:iam::ACCOUNT_ID:role/workflow-api-staging
+
+  env:
+    LOG_LEVEL: DEBUG
+    WORKERS: "2"
+
+worker:
+  replicaCount: 2
+  concurrency: 2
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+  hpa:
+    minReplicas: 2
+    maxReplicas: 8
+
+  iamRoleArn: arn:aws:iam::ACCOUNT_ID:role/workflow-worker-staging

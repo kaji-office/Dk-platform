@@ -1,0 +1,201 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Default values — override per environment in infra/helm/values/{env}.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  environment: staging
+  awsRegion: us-east-1
+  # ECR registry — set via --set in CI
+  imageRegistry: ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API Service
+# ─────────────────────────────────────────────────────────────────────────────
+api:
+  enabled: true
+
+  image:
+    repository: workflow-api
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8000
+
+  ingress:
+    enabled: true
+    className: alb
+    annotations:
+      kubernetes.io/ingress.class: alb
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/healthcheck-path: /v1/health
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+    host: api-staging.workflowplatform.io
+    tlsSecretName: ""   # Managed by ACM on ALB — leave empty
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /v1/health
+      port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /v1/health/ready
+      port: 8000
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
+
+  env:
+    LOG_LEVEL: INFO
+    WORKERS: "4"
+    WORKER_CLASS: uvicorn.workers.UvicornWorker
+    OTEL_SERVICE_NAME: workflow-api
+
+  # Secret name in the same namespace (populated by external-secrets)
+  secretRef: workflow-platform-secrets
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: /metrics
+
+  serviceAccountName: workflow-api
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Worker Service (Celery)
+# ─────────────────────────────────────────────────────────────────────────────
+worker:
+  enabled: true
+
+  image:
+    repository: workflow-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  replicaCount: 2
+
+  # Workers don't have an ingress — they pull from Redis
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 60
+
+  concurrency: 4
+  queues: "default,execution,scheduler"
+
+  livenessProbe:
+    exec:
+      command:
+        - celery
+        - -A
+        - workflow_worker.celery_app
+        - inspect
+        - ping
+        - -d
+        - "celery@$HOSTNAME"
+    initialDelaySeconds: 30
+    periodSeconds: 60
+    failureThreshold: 3
+
+  env:
+    LOG_LEVEL: INFO
+    OTEL_SERVICE_NAME: workflow-worker
+
+  secretRef: workflow-platform-secrets
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: /metrics
+
+  serviceAccountName: workflow-worker
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Beat Scheduler (Celery Beat — exactly one replica, never scaled)
+# Fires schedule ticks that the worker pool picks up via Redis.
+# ─────────────────────────────────────────────────────────────────────────────
+beat:
+  enabled: true
+
+  image:
+    repository: workflow-worker   # same image as worker
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # MUST stay at 1 — multiple beat processes send duplicate schedule ticks
+  replicaCount: 1
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  env:
+    LOG_LEVEL: INFO
+    OTEL_SERVICE_NAME: workflow-beat
+
+  secretRef: workflow-platform-secrets
+
+  serviceAccountName: workflow-worker   # reuse worker SA — same permissions needed
+
+  podAnnotations:
+    prometheus.io/scrape: "false"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alembic Migration Job (run before deploy)
+# ─────────────────────────────────────────────────────────────────────────────
+migration:
+  image:
+    repository: workflow-api   # same image — runs alembic upgrade head
+    tag: latest
+  secretRef: workflow-platform-secrets
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespace
+# ─────────────────────────────────────────────────────────────────────────────
+namespace: workflow-staging

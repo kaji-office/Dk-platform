@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workflow-api"
+version = "1.0.0"
+description = "AI Workflow Builder — FastAPI Gateway (Thin delivery layer)"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "workflow-engine>=1.0.0",      # The SDK — only internal dep with logic
+
+    # Web framework
+    "fastapi>=0.111,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "python-multipart>=0.0.9",     # Form data support
+
+    # Task queue (dispatch only — no task logic here)
+    "celery>=5.4,<6",
+    "redis>=5.0,<6",
+
+    # Database clients (connection pooling at API layer)
+    "motor>=3.4,<4",
+    "aioredis>=2.0,<3",
+    "asyncpg>=0.29,<1",
+
+    # Alembic migrations
+    "alembic>=1.13,<2",
+
+    # AWS
+    "aioboto3>=12.0,<13",
+
+    # Observability
+    "aws-xray-sdk>=2.12,<3",
+    "boto3>=1.34,<2",              # CloudWatch metrics
+
+    # Auth extras
+    "python-jose[cryptography]>=3.3,<4",
+    "passlib[bcrypt]>=1.7,<2",
+
+    # Email
+    "sendgrid>=6.11,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",                 # TestClient
+    "pytest-cov>=5.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/workflow_api"]

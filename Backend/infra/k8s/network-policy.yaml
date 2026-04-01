@@ -1,0 +1,204 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Network Policies — default-deny then allow only required flows:
+#
+#   Internet → ALB → workflow-api (port 8000)
+#   workflow-api → workflow-worker (via Redis — not direct)
+#   workflow-api / workflow-worker → external: RDS, MongoDB Atlas, Redis, S3
+#   No pod-to-pod lateral movement otherwise
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Default deny-all ingress + egress (applied to both namespaces) ────────────
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: workflow-staging
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: workflow-production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+# ── Allow API pods: ingress from ALB, egress to DNS + external datastores ─────
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api
+  namespace: workflow-staging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ALB injects traffic on the node port — allow all ingress to port 8000
+    - ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # DNS resolution
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL (RDS)
+    - ports:
+        - protocol: TCP
+          port: 5432
+    # MongoDB Atlas
+    - ports:
+        - protocol: TCP
+          port: 27017
+    # Redis (ElastiCache)
+    - ports:
+        - protocol: TCP
+          port: 6379
+    # S3 / AWS APIs (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: 443
+    # SMTP (SendGrid)
+    - ports:
+        - protocol: TCP
+          port: 587
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api
+  namespace: workflow-production
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 5432
+    - ports:
+        - protocol: TCP
+          port: 27017
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
+    - ports:
+        - protocol: TCP
+          port: 587
+
+# ── Allow Worker pods: no ingress (pull-only), egress to datastores ───────────
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker
+  namespace: workflow-staging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Prometheus scrape from monitoring namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 5432
+    - ports:
+        - protocol: TCP
+          port: 27017
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-worker
+  namespace: workflow-production
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: workflow-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 5432
+    - ports:
+        - protocol: TCP
+          port: 27017
+    - ports:
+        - protocol: TCP
+          port: 6379
+    - ports:
+        - protocol: TCP
+          port: 443
