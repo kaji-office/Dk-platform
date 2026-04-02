@@ -1,16 +1,21 @@
 import asyncio
+import contextlib
+import json
+import logging
 from typing import Any
 import uuid
 
-from fastapi import APIRouter, Request, status, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, Request, status, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from workflow_api.dependencies import CurrentUser, TenantId, RequireWrite
 from workflow_engine.chat.models import ConversationPhase, RequirementSpec, ChatSession
 from workflow_engine.chat.orchestrator import ChatOrchestrator
 from workflow_engine.models import WorkflowDefinition
 
-router = APIRouter(prefix="/v1/chat/sessions", tags=["Chat"])
+router = APIRouter(prefix="/chat/sessions", tags=["Chat"])
 
 class CreateMessageRequest(BaseModel):
     content: str
@@ -101,26 +106,85 @@ async def submit_workflow_edits(session_id: str, body: UpdateWorkflowRequest, us
     return dataclasses.asdict(res)
 
 @router.websocket("/ws/chat/{session_id}")
-async def stream_chat(websocket: WebSocket, session_id: str) -> None:
+async def stream_chat(
+    websocket: WebSocket,
+    session_id: str,
+    token: str | None = Query(default=None),
+) -> None:
     """
-    WebSocket streaming.
-    In a fully event-driven architecture, this would subscribe to a Redis PubSub channel.
-    Here we mock the connection emitting token patterns.
+    WebSocket chat streaming backed by Redis PubSub.
+
+    Connect: wss://.../api/v1/chat/sessions/ws/chat/{session_id}?token=<jwt>
+
+    Client sends:  {"type": "message", "content": "..."}
+    Server emits:
+        {"type": "status",   "phase": "PROCESSING"}
+        {"type": "phase",    "phase": "CLARIFYING"|"GENERATING"}
+        {"type": "response", "phase": "COMPLETE", "message": "...", "workflow_id": "..."}
     """
-    await websocket.accept()
+    # Authenticate via query param — browsers can't set Authorization headers on WebSocket.
+    if not token:
+        await websocket.close(code=4001, reason="Missing token")
+        return
     try:
-        # A true implementation subscribes to LLM tokens. We emit a dummy stream payload.
-        await websocket.send_json({"type": "token", "content": "Connected."})
-        while True:
-            # Keep open
-            data = await websocket.receive_text()
-            if data == "close":
-                break
-            await websocket.send_json({"type": "token", "content": f"ACK {data}"})
-    except WebSocketDisconnect:
-        pass
-    finally:
+        user = await websocket.app.state.auth_service.verify_token(token)
+    except Exception:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    tenant_id: str = user["tenant_id"]
+    orch: ChatOrchestrator = websocket.app.state.chat_orchestrator
+    redis_client = websocket.app.state.redis_client
+    channel = f"chat:{session_id}:events"
+
+    await websocket.accept()
+
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+
+    async def _publisher(sid: str, event: dict) -> None:
         try:
-            await websocket.close(code=1000)
-        except Exception:
+            await redis_client.publish(f"chat:{sid}:events", json.dumps(event))
+        except Exception as exc:
+            logger.warning("chat publish error: %s", exc)
+
+    async def _listen_pubsub() -> None:
+        async for msg in pubsub.listen():
+            if msg["type"] == "message":
+                try:
+                    await websocket.send_text(msg["data"])
+                except Exception:
+                    return
+
+    async def _handle_client() -> None:
+        try:
+            async for raw in websocket.iter_text():
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "message" and data.get("content"):
+                    asyncio.create_task(
+                        orch.process_message(
+                            session_id, tenant_id, data["content"], publish=_publisher
+                        )
+                    )
+        except WebSocketDisconnect:
             pass
+
+    pubsub_task = asyncio.create_task(_listen_pubsub())
+    client_task = asyncio.create_task(_handle_client())
+
+    try:
+        await asyncio.wait({pubsub_task, client_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        pubsub_task.cancel()
+        client_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pubsub_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await client_task
+        with contextlib.suppress(Exception):
+            await pubsub.aclose()
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1000)

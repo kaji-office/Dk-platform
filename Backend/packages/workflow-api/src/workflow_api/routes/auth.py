@@ -48,6 +48,11 @@ async def register(body: RegisterRequest, request: Request) -> dict:
         user = await svc.register(email=body.email, password=body.password, full_name=body.full_name)
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
+    await request.app.state.audit_service.write(
+        tenant_id="system", event_type="auth.register", user_id=user["id"],
+        resource_type="user", resource_id=user["id"],
+        detail={"email": body.email},
+    )
     return {"user_id": user["id"], "email": user["email"]}
 
 
@@ -59,6 +64,11 @@ async def login(body: LoginRequest, request: Request) -> dict:
         tokens = await svc.login(email=body.email, password=body.password)
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": str(exc)})
+    await request.app.state.audit_service.write(
+        tenant_id="system", event_type="auth.login", user_id=None,
+        resource_type="user", resource_id=None,
+        detail={"email": body.email},
+    )
     return tokens  # {"access_token", "refresh_token", "expires_in"}
 
 
@@ -73,15 +83,23 @@ async def logout(request: Request):
 @router.post("/token/refresh")
 async def refresh_token(body: TokenRefreshRequest, request: Request) -> dict:
     """Issue a new access token using a valid refresh token."""
+    from fastapi import HTTPException
     svc = request.app.state.auth_service
-    return await svc.refresh(body.refresh_token)
+    try:
+        return await svc.refresh(body.refresh_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
 
 
 @router.post("/verify-email")
 async def verify_email(token: str, request: Request) -> dict:
     """Verify email address using the token sent by email."""
+    from fastapi import HTTPException
     svc = request.app.state.auth_service
-    await svc.verify_email(token)
+    try:
+        await svc.verify_email(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return {"verified": True}
 
 
@@ -94,8 +112,12 @@ async def password_reset_request(body: PasswordResetRequest, request: Request) -
 
 @router.post("/password/reset")
 async def password_reset(body: PasswordChangeRequest, request: Request) -> dict:
+    from fastapi import HTTPException
     svc = request.app.state.auth_service
-    await svc.reset_password(body.token, body.new_password)
+    try:
+        await svc.reset_password(body.token, body.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return {"reset": True}
 
 
@@ -117,13 +139,21 @@ async def mfa_verify(body: MFAVerifyRequest, request: Request) -> dict:
 @router.get("/oauth/{provider}")
 async def oauth_redirect(provider: str, request: Request):
     """Initiate OAuth flow for a provider (google, github, microsoft)."""
+    from fastapi import HTTPException
     svc = request.app.state.auth_service
-    url = await svc.oauth_redirect_url(provider)
-    return {"redirect_url": url}
+    try:
+        url = await svc.oauth_redirect_url(provider)
+        return {"redirect_url": url}
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))
 
 
 @router.get("/oauth/{provider}/callback")
 async def oauth_callback(provider: str, code: str, request: Request) -> dict:
     """Handle OAuth callback and return platform tokens."""
+    from fastapi import HTTPException
     svc = request.app.state.auth_service
-    return await svc.oauth_exchange(provider, code)
+    try:
+        return await svc.oauth_exchange(provider, code)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(exc))

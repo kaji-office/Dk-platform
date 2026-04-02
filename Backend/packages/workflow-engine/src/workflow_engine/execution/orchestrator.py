@@ -91,7 +91,19 @@ class RunOrchestrator:
             await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.RUNNING)
 
             async def _execute_loop() -> Any:
-                context = NodeContext(run_id=run_id, node_id=node_id, tenant_id=tenant_id, input_data=inputs)
+                # Auto-load all run-scoped state written by SetStateNode into context.state
+                run_state_dict: dict[str, Any] = {}
+                if self.services.cache:
+                    import json as _json
+                    state_keys = await self.services.cache.smembers(f"state_keys:{run_id}")
+                    for sk in state_keys:
+                        raw = await self.services.cache.get(f"state:{run_id}:{sk}")
+                        if raw is not None:
+                            try:
+                                run_state_dict[sk] = _json.loads(raw)
+                            except Exception:
+                                run_state_dict[sk] = raw
+                context = NodeContext(run_id=run_id, node_id=node_id, tenant_id=tenant_id, input_data=inputs, state=run_state_dict)
                 out = await node_impl.execute(node_def.config, context, self.services)
                 return out
 
@@ -116,6 +128,7 @@ class RunOrchestrator:
                     if run_state:
                         run_state.output_data = out_payload
                         await self.repo.update_state(tenant_id, run_id, run_state)
+                    await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.SUCCESS)
                     return await self.repo.get(tenant_id, run_id) or False
 
                 # Handle WAITING_HUMAN correctly

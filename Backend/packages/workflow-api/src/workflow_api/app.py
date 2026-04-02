@@ -12,6 +12,8 @@ so they have access to the validated request body and path parameters.
 """
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -45,7 +47,8 @@ def _get_tenant_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-limiter = Limiter(key_func=_get_tenant_key, default_limits=["60/minute"])
+_redis_url = os.environ.get("REDIS_URL", "memory://")
+limiter = Limiter(key_func=_get_tenant_key, default_limits=["60/minute"], storage_uri=_redis_url)
 
 
 def create_app(

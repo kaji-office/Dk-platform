@@ -100,3 +100,21 @@ class RedisCache(CachePort):
             return await self._client.ttl(self._key(key))
         except Exception:
             return -2
+
+    async def sadd(self, key: str, *members: str, ttl_seconds: int | None = None) -> None:
+        """Add members to a Redis set, with optional TTL on the set key."""
+        try:
+            await self._client.sadd(self._key(key), *members)
+            if ttl_seconds is not None:
+                await self._client.expire(self._key(key), ttl_seconds)
+        except Exception as exc:
+            logger.warning(f"RedisCache.sadd() error for key={key!r}: {exc}")
+
+    async def smembers(self, key: str) -> set[str]:
+        """Return all members of a Redis set as strings."""
+        try:
+            raw = await self._client.smembers(self._key(key))
+            return {m.decode("utf-8") if isinstance(m, bytes) else m for m in raw}
+        except Exception as exc:
+            logger.warning(f"RedisCache.smembers() error for key={key!r}: {exc}")
+            return set()

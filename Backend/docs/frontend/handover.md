@@ -30,42 +30,65 @@ User types in ChatPanel
 ## 2. Correct API Paths
 
 > The template used `/chat/query`, `/chat/clarify`, `/workflow/generate` — **these do not exist**.
-> The real paths are below. All routes are prefixed `/v1`.
+> All routes are prefixed `/api/v1`. Base URL: `http://localhost:8000` (local), `https://api.workflowplatform.io` (prod).
+
+### Auth
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/v1/auth/register` | Create tenant + owner — sends verification email |
+| `POST` | `/api/v1/auth/login` | Email + password → `{access_token, refresh_token}` |
+| `POST` | `/api/v1/auth/logout` | Revoke refresh token |
+| `POST` | `/api/v1/auth/token/refresh` | Rotate refresh token → new pair |
+| `POST` | `/api/v1/auth/verify-email` | Verify email with token from link `{token}` |
+| `POST` | `/api/v1/auth/password/reset-request` | Send password reset email `{email}` |
+| `POST` | `/api/v1/auth/password/reset` | Set new password `{token, new_password}` |
 
 ### Chat
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/v1/chat/sessions` | Create session — returns `{session_id, phase}` |
-| `GET` | `/v1/chat/sessions` | List tenant sessions |
-| `GET` | `/v1/chat/sessions/{session_id}` | Get session + full message history |
-| `POST` | `/v1/chat/sessions/{session_id}/message` | Send message → AI reply + optional DAG |
-| `POST` | `/v1/chat/sessions/{session_id}/generate` | Force DAG generation (EDITOR role) |
-| `PUT` | `/v1/chat/sessions/{session_id}/workflow` | Submit canvas edits → validation |
-| `WS` | `/ws/chat/{session_id}` | Stream LLM tokens in real-time |
+| `POST` | `/api/v1/chat/sessions` | Create session — returns `{session_id, phase}` |
+| `GET` | `/api/v1/chat/sessions` | List tenant sessions |
+| `GET` | `/api/v1/chat/sessions/{session_id}` | Get session + full message history |
+| `POST` | `/api/v1/chat/sessions/{session_id}/message` | Send message → AI reply + optional DAG |
+| `POST` | `/api/v1/chat/sessions/{session_id}/generate` | Force DAG generation (EDITOR role) |
+| `PUT` | `/api/v1/chat/sessions/{session_id}/workflow` | Submit canvas edits → validation |
+| `WS` | `/api/v1/chat/sessions/ws/chat/{session_id}` | Real-time streaming (auth via `?token=<jwt>`) |
 
 ### Workflow CRUD
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/v1/workflows` | List workflows |
-| `POST` | `/v1/workflows` | Create blank workflow |
-| `GET` | `/v1/workflows/{id}` | Get workflow definition |
-| `PUT` | `/v1/workflows/{id}` | Save workflow edits |
-| `DELETE` | `/v1/workflows/{id}` | Delete workflow |
-| `POST` | `/v1/workflows/{id}/trigger` | Execute workflow |
-| `POST` | `/v1/workflows/{id}/activate` | Activate scheduled/webhook workflow |
+| `GET` | `/api/v1/workflows` | List workflows |
+| `POST` | `/api/v1/workflows` | Create blank workflow |
+| `GET` | `/api/v1/workflows/{id}` | Get workflow definition |
+| `PUT` | `/api/v1/workflows/{id}` | Save workflow `{workflow: WorkflowDefinition}` |
+| `DELETE` | `/api/v1/workflows/{id}` | Delete workflow |
+| `POST` | `/api/v1/workflows/{id}/trigger` | Execute workflow |
+| `POST` | `/api/v1/workflows/{id}/activate` | Activate scheduled/webhook workflow |
 
 ### Execution
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/v1/executions` | List runs (filterable by workflow) |
-| `GET` | `/v1/executions/{run_id}` | Get run detail |
-| `POST` | `/v1/executions/{run_id}/cancel` | Cancel run |
-| `GET` | `/v1/executions/{run_id}/nodes` | Per-node execution states |
-| `GET` | `/v1/executions/{run_id}/logs` | Execution logs |
-| `WS` | `/ws/executions/{run_id}` | Stream node status updates |
+| `GET` | `/api/v1/executions` | List runs (filterable by workflow) |
+| `GET` | `/api/v1/executions/{run_id}` | Get run detail |
+| `POST` | `/api/v1/executions/{run_id}/cancel` | Cancel run |
+| `GET` | `/api/v1/executions/{run_id}/nodes` | Per-node execution states |
+| `GET` | `/api/v1/executions/{run_id}/logs` | Execution logs |
+| `WS` | `/api/v1/ws/executions/{run_id}` | Stream node status (auth via `?token=<jwt>`) |
+
+### Inbound Webhooks
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/webhooks/inbound` | List registered inbound webhooks |
+| `POST` | `/api/v1/webhooks/inbound` | Register new inbound webhook (get `endpoint_url` + `secret`) |
+| `GET` | `/api/v1/webhooks/inbound/{id}` | Get inbound webhook details |
+| `PATCH` | `/api/v1/webhooks/inbound/{id}` | Update / deactivate |
+| `DELETE` | `/api/v1/webhooks/inbound/{id}` | Soft-delete |
+| `POST` | `/api/v1/webhooks/inbound/{workflow_id}` | **External trigger** — HMAC-signed POST from external system |
 
 ---
 
@@ -77,7 +100,7 @@ User types in ChatPanel
 interface ChatMessageResponse {
   session_id: string
   phase: 'GATHERING' | 'CLARIFYING' | 'FINALIZING' | 'GENERATING' | 'COMPLETE'
-  reply: string                          // assistant text — always present
+  message: string                        // assistant text — always present (NOT "reply")
 
   // CLARIFYING phase only — render as form cards
   clarification: {
@@ -95,6 +118,8 @@ interface ChatMessageResponse {
   workflow_id: string | null
 }
 ```
+
+> **Correction:** The field is `message`, not `reply`. Verified against live API — `response.message` is the assistant text.
 
 ### 3.2 ClarificationQuestion — drives the input widget type
 
@@ -142,9 +167,10 @@ interface NodeUIConfig {
 interface EdgeDefinition {
   id: string                // e.g. "edge_node1_output__node2_input"
   source_node_id: string
-  source_port: string       // e.g. "output", "true_branch", "false_branch"
+  source_port: string       // "default" = pass all upstream outputs; named port = e.g. "true", "false", "rendered"
   target_node_id: string
-  target_port: string       // e.g. "input"
+  target_port: string       // "default" = spread all values as top-level template variables;
+                            // named port = e.g. "input" nests them under that key
 }
 
 interface WorkflowUIMetadata {
@@ -162,12 +188,18 @@ interface WorkflowUIMetadata {
 ### 3.4 Workflow Update Request/Response
 
 ```typescript
-// PUT /v1/chat/sessions/{id}/workflow
+// PUT /api/v1/chat/sessions/{id}/workflow
+// Body: complete WorkflowDefinition replacement — NOT a diff
 interface WorkflowUpdateRequest {
-  workflow_id?: string
-  updated_nodes: Record<string, NodeDefinition>
-  updated_edges: EdgeDefinition[]
-  ui_metadata: WorkflowUIMetadata
+  workflow: WorkflowDefinition   // full replacement (nodes + edges + ui_metadata)
+}
+
+// PUT /api/v1/workflows/{id}  (auto-save from canvas)
+// Body: PatchWorkflowRequest — flat fields, not wrapped in {workflow:}
+interface WorkflowSaveRequest {
+  name?: string
+  description?: string
+  definition?: WorkflowDefinition   // full replacement (nodes + edges + ui_metadata)
 }
 
 interface WorkflowUpdateResponse {
@@ -188,41 +220,66 @@ interface WorkflowUpdateResponse {
 
 > The template used 6 generic types (`input | api | llm | transform | condition | output`).
 > The platform has **17 specific types** across 5 categories. Use these exact string values.
+>
+> **Critical:** type values are PascalCase strings ending in `Node` — not snake_case.
+> Sending `"manual_trigger"` or `"output"` will cause a 422 validation error.
 
 | `type` value | Display Label | Icon | Hex Colour | Category |
 |---|---|---|---|---|
-| `prompt` | AI Prompt | `sparkles` | `#6366f1` | `ai_reasoning` |
-| `agent` | AI Agent | `cpu` | `#8b5cf6` | `ai_reasoning` |
-| `semantic_search` | Semantic Search | `search` | `#a855f7` | `ai_reasoning` |
-| `code_execution` | Run Code | `code` | `#f59e0b` | `execution_data` |
-| `api_request` | HTTP Request | `globe` | `#3b82f6` | `execution_data` |
-| `templating` | Template | `file-text` | `#06b6d4` | `execution_data` |
-| `web_search` | Web Search | `search-check` | `#0ea5e9` | `execution_data` |
-| `mcp` | MCP Tool | `plug` | `#64748b` | `execution_data` |
-| `set_state` | Set State | `database` | `#10b981` | `workflow_management` |
-| `custom` | Custom | `wrench` | `#84cc16` | `workflow_management` |
-| `note` | Note | `sticky-note` | `#e2e8f0` | `workflow_management` |
-| `output` | Output | `arrow-right-circle` | `#14b8a6` | `workflow_management` |
-| `control_flow` | Control Flow | `git-branch` | `#f97316` | `logic_orchestration` |
-| `subworkflow` | Sub-Workflow | `layers` | `#ec4899` | `logic_orchestration` |
-| `manual_trigger` | Manual Trigger | `play` | `#22c55e` | `triggers` |
-| `scheduled_trigger` | Scheduled | `clock` | `#22c55e` | `triggers` |
-| `integration_trigger` | Webhook | `zap` | `#22c55e` | `triggers` |
+| `PromptNode` | AI Prompt | `sparkles` | `#6366f1` | `ai_reasoning` |
+| `AgentNode` | AI Agent | `cpu` | `#8b5cf6` | `ai_reasoning` |
+| `SemanticSearchNode` | Semantic Search | `search` | `#a855f7` | `ai_reasoning` |
+| `CodeExecutionNode` | Run Code | `code` | `#f59e0b` | `execution_data` |
+| `APIRequestNode` | HTTP Request | `globe` | `#3b82f6` | `execution_data` |
+| `TemplatingNode` | Template | `file-text` | `#06b6d4` | `execution_data` |
+| `WebSearchNode` | Web Search | `search-check` | `#0ea5e9` | `execution_data` |
+| `MCPNode` | MCP Tool | `plug` | `#64748b` | `execution_data` |
+| `SetStateNode` | Set State | `database` | `#10b981` | `workflow_management` |
+| `CustomNode` | Custom | `wrench` | `#84cc16` | `workflow_management` |
+| `NoteNode` | Note | `sticky-note` | `#e2e8f0` | `workflow_management` |
+| `OutputNode` | Output | `arrow-right-circle` | `#14b8a6` | `workflow_management` |
+| `ControlFlowNode` | Control Flow | `git-branch` | `#f97316` | `logic_orchestration` |
+| `SubworkflowNode` | Sub-Workflow | `layers` | `#ec4899` | `logic_orchestration` |
+| `ManualTriggerNode` | Manual Trigger | `play` | `#22c55e` | `triggers` |
+| `ScheduledTriggerNode` | Scheduled | `clock` | `#22c55e` | `triggers` |
+| `IntegrationTriggerNode` | Webhook | `zap` | `#22c55e` | `triggers` |
 
 ---
 
 ## 5. WebSocket Protocols
 
-### Chat WebSocket — `/ws/chat/{session_id}`
+### Chat WebSocket — `WS /api/v1/chat/sessions/ws/chat/{session_id}`
+
+> **Auth:** Browsers cannot set `Authorization` headers on WebSocket connections.
+> Pass the JWT as a query param: `?token=<access_token>`
+> The server closes with code 4001 if token is missing or invalid.
 
 ```typescript
-// Server → Client only (client sends messages via REST, not WS)
+// Client → Server (send a chat message)
+interface ChatWsClientMessage {
+  type: 'message'
+  content: string    // the user's text
+}
+
+// Server → Client events
 type ChatWsEvent =
-  | { type: 'token';          content: string }
-  | { type: 'done';           phase: ConversationPhase; full_response: ChatMessageResponse }
-  | { type: 'phase_change';   from: ConversationPhase; to: ConversationPhase }
-  | { type: 'workflow_ready'; workflow_id: string; workflow_preview: WorkflowDefinition }
+  | { type: 'status';   phase: 'PROCESSING' }           // orchestrator started
+  | { type: 'phase';    phase: 'CLARIFYING' | 'GENERATING' }  // phase transition
+  | { type: 'response'; phase: 'COMPLETE'; message: string; workflow_id: string | null }
+
+// Connection lifecycle:
+//   1. Connect with ?token=<jwt>
+//   2. Send { type: "message", content: "..." } for each user turn
+//   3. Server emits status/phase events during processing, then response when done
+//   4. After receiving "response", fetch full ChatMessageResponse via
+//      GET /api/v1/chat/sessions/{session_id} to get clarification questions,
+//      requirement_spec, workflow_preview, etc.
 ```
+
+> **Note:** The streaming WebSocket delivers lightweight phase signals only.
+> Rich payload (clarification questions, WorkflowDefinition, RequirementSpec) always
+> comes from the REST endpoints — never from the WebSocket. This keeps the WS lean and
+> the REST API as the single source of truth for session state.
 
 ### Execution WebSocket — `/ws/executions/{run_id}`
 
@@ -323,17 +380,113 @@ Config panel overlaps canvas with drop shadow — it does **not** shrink the can
 
 ---
 
-## 11. Key Corrections from Earlier Template
+## 11. Email Verification & Password Reset Flow
+
+These flows are fully implemented — the frontend pages for `/verify-email/[token]` and `/reset-password/[token]` just need to call the API.
+
+```
+Registration flow:
+  POST /api/v1/auth/register { email, password, name, tenant_name }
+    → 201 { access_token, refresh_token, expires_in }
+    → verification email sent automatically (SMTP)
+  
+  User clicks link in email: /verify-email?token=<token>
+    POST /api/v1/auth/verify-email { token }
+    → 200 OK — email verified, user.is_verified = true
+
+Password reset flow:
+  POST /api/v1/auth/password/reset-request { email }
+    → 204 always (no enumeration — response same whether account exists)
+    → reset email sent if account found
+  
+  User clicks link in email: /reset-password?token=<token>
+    POST /api/v1/auth/password/reset { token, new_password }
+    → 200 OK — password updated, token marked used
+    → 400 if token expired (24h TTL) or already used
+```
+
+Frontend notes:
+- Show "Check your email" screen after register — don't auto-navigate to dashboard until verified
+- `is_verified: false` on the `User` object → display persistent banner until verified
+- Reset-request page: always show "Email sent" even if 204 (prevents account enumeration)
+
+---
+
+## 12. Rate Limiting
+
+All API endpoints are rate-limited per tenant: **60 requests/minute**.
+
+On limit exceeded the server returns `429 Too Many Requests`:
+```json
+{ "error": { "code": "RATE_LIMIT_EXCEEDED", "message": "...", "request_id": "..." } }
+```
+
+Headers on the 429 response:
+```
+Retry-After: 60          ← seconds until window resets
+X-RateLimit-Limit: 60
+X-RateLimit-Remaining: 0
+```
+
+Frontend must handle 429 in the Axios interceptor — show a toast and retry after `Retry-After` seconds. Do NOT retry automatically for user-initiated actions.
+
+---
+
+## 13. Inbound Webhook Management (for `integration_trigger` nodes)
+
+When a workflow uses an `integration_trigger` node, the user registers an inbound webhook so an external system can trigger it via HTTP POST.
+
+```typescript
+// POST /api/v1/webhooks/inbound
+interface InboundWebhookCreate {
+  name: string        // human-readable label
+  workflow_id: string // workflow to trigger
+  events?: string[]  // optional — for documentation only
+  is_active?: boolean
+}
+
+interface InboundWebhook {
+  id: string
+  name: string
+  workflow_id: string
+  tenant_id: string
+  endpoint_url: string    // share this with the external system
+  webhook_secret: string  // ⚠ SHOWN ONCE — store it; HMAC-SHA256 signing key
+  is_active: boolean
+  created_at: string
+}
+```
+
+UI behaviour:
+- After creating, show `webhook_secret` in a copy-to-clipboard modal with "Store this now — it won't be shown again"
+- The `endpoint_url` is always visible and safe to display
+- On the workflow canvas, the `integration_trigger` node config panel should include a "Webhook" section that shows the registered endpoint URL and a "Regenerate Secret" button
+
+External system signs requests:
+```python
+# How the external system must sign:
+import hmac, hashlib
+sig = hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+headers["X-Webhook-Signature"] = f"sha256={sig}"
+```
+
+---
+
+## 14. Key Corrections from Earlier Template
 
 | Template said | Actual |
 |---|---|
-| `POST /chat/query` | `POST /v1/chat/sessions/{id}/message` |
+| `POST /chat/query` | `POST /api/v1/chat/sessions/{id}/message` |
 | `POST /chat/clarify` | No separate endpoint — answered via next `/message` call |
-| `POST /workflow/generate` | `POST /v1/chat/sessions/{id}/generate` |
-| `PUT /workflow/update` | `PUT /v1/chat/sessions/{id}/workflow` |
+| `POST /workflow/generate` | `POST /api/v1/chat/sessions/{id}/generate` |
+| `PUT /workflow/update` | `PUT /api/v1/chat/sessions/{id}/workflow` |
+| All paths prefixed `/v1/` | Prefix is `/api/v1/` |
 | `nodes: []` (array) | `nodes: {}` (object keyed by node_id) |
 | Edge fields `source / target` | `source_node_id / target_node_id` + `source_port / target_port` |
 | `type: "text \| select \| boolean"` | `input_type: "text \| select \| multiselect \| boolean \| number"` |
 | 6 generic node types | 17 specific node types (see §4) |
 | Single global state object | Two stores: `chatStore` + `workflowStore` |
 | `clarification_questions: string[]` | `clarification: ClarificationBlock` (structured, typed) |
+| Chat WS sends `token/done/phase_change/workflow_ready` | Sends `status/phase/response` — no streaming tokens; fetch REST for full payload |
+| `WorkflowUpdateRequest` has `updated_nodes`/`updated_edges` | Body is `{ workflow: WorkflowDefinition }` — full replacement |
+| Auto-save to `PUT /api/v2/workflows/{id}` | `PUT /api/v1/workflows/{id}` |

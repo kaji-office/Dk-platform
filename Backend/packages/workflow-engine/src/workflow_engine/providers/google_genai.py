@@ -53,6 +53,46 @@ class GoogleGenAIProvider(LLMPort):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _generate)
 
+    async def complete_with_usage(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        """
+        Generate a completion using Google GenAI with native token counting.
+
+        Uses response.usage_metadata for output token counts and
+        client.models.count_tokens() for input token counts (native API, no estimation).
+        """
+        model_id = kwargs.get("model", self.model)
+
+        def _generate() -> dict[str, Any]:
+            response = self.client.models.generate_content(
+                model=model_id,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=kwargs.get("temperature", 0.0),
+                ),
+            )
+            usage = response.usage_metadata
+            return {
+                "text": response.text,
+                "input_tokens": usage.prompt_token_count or 0,
+                "output_tokens": usage.candidates_token_count or 0,
+                "thoughts_tokens": getattr(usage, "thoughts_token_count", None) or 0,
+            }
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _generate)
+
+    def count_tokens(self, content: str, model_id: str | None = None) -> int:
+        """
+        Count tokens for a prompt without generating a completion.
+        Uses Google GenAI native count_tokens() API — no tiktoken estimation.
+        """
+        try:
+            return self.client.models.count_tokens(
+                model=model_id or self.model, contents=content
+            ).total_tokens
+        except Exception:
+            return 0
+
     async def embed(self, text: str, **kwargs: Any) -> list[float]:
         def _embed() -> list[float]:
             response = self.client.models.embed_content(

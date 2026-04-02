@@ -469,7 +469,7 @@ if not config.mcp_node_enabled:
 **File:** `workflow_engine/cache/`
 
 **Deliverables:**
-- `RedisCache` — implements `CachePort` (aioredis), TTL support
+- `RedisCache` — implements `CachePort` (redis.asyncio), TTL support
 - `SemanticCache` — embedding lookup via pgvector, similarity threshold 0.95
 - `CacheKeyBuilder` — deterministic key from (model, prompt_hash, params)
 
@@ -477,6 +477,8 @@ if not config.mcp_node_enabled:
 - [x] Cache hit returns without calling LLM provider
 - [x] Semantic cache similarity threshold configurable per tenant
 - [x] Cache eviction does not raise — returns None gracefully
+- [x] **[GAP-D7-1]** `CachePort.sadd()` had no body — Python crash. Added explicit `pass`. `smembers()` and `sadd()` default methods added to `CachePort` ABC
+- [x] **[GAP-D7-2]** `RedisCache` missing `sadd()` + `smembers()` — `SetStateNode` state tracking broken. Both implemented in `redis_cache.py`
 
 ---
 
@@ -494,8 +496,8 @@ if not config.mcp_node_enabled:
 
 | # | Task | Status | Assigned To | Started | Completed | Depends On |
 |---|------|--------|-------------|---------|-----------|------------|
-| E-1 | **workflow-api — FastAPI Layer** | 🔄 In Progress | @antigravity | 2026-03-31 | — | C-1, D-1, D-2, D-3 |
-| E-2 | **workflow-worker — Celery Layer** | 🔄 In Progress | @antigravity | 2026-03-31 | — | C-1, D-2 |
+| E-1 | **workflow-api — FastAPI Layer** | ✅ Done | @antigravity | 2026-03-31 | 2026-04-01 | C-1, D-1, D-2, D-3 |
+| E-2 | **workflow-worker — Celery Layer** | ✅ Done | @antigravity | 2026-03-31 | 2026-04-01 | C-1, D-2 |
 | E-3 | **workflow-cli — CLI Layer** | ✅ Done | @antigravity | 2026-03-31 | 2026-03-31 | E-1 |
 
 ### E-1 — workflow-api
@@ -539,6 +541,13 @@ if not config.mcp_node_enabled:
 - [x] API tests cover every route in openapi.yaml
 - [x] **[GAP-E1-1]** `packages/workflow-api/src/workflow_api/auth/` directory deleted — it is empty and causes architectural confusion (auth belongs in the SDK and `dependencies.py`)
 - [x] **[GAP-E1-2]** `packages/workflow-api/src/workflow_api/main.py` created — startup script that reads env vars, instantiates all 10 SDK services, and calls `create_app(services={...})`; currently `app.py` calls `create_app()` with no services, so all route handlers will crash on `request.app.state.auth_service` access
+- [x] **[GAP-E1-3]** `WorkflowDefinition.nodes` is `dict[str, NodeDefinition]` but `/workflows` POST accepted `"nodes": []` (array) → 422. Fixed in `PlatformWorkflowService.create()`: normalizes list → empty dict; `description` field added to `WorkflowDefinition`
+- [x] **[GAP-E1-4]** Chat router prefix was `/v1/chat/sessions` inside `include_router(prefix="/api/v1")` → routes at `/api/v1/v1/chat/sessions`. Fixed to `/chat/sessions`
+- [x] **[GAP-E1-5]** RBAC enums used `ADMIN` in OpenAPI spec; actual role enum is `OWNER/EDITOR/VIEWER` — spec corrected
+- [x] **[GAP-E1-6]** Rate limiter (`slowapi`) was imported and wired in `app.py` but `slowapi` package was missing from `workflow-api/pyproject.toml` — added `slowapi>=0.1.9`
+- [x] **[GAP-E1-7]** `PlatformWebhookService` was a full stub (no DB); replaced with asyncpg-backed implementation after `002_webhooks.sql` migration
+- [x] **[GAP-E1-8]** `EmailService` added using stdlib `smtplib`; `verify_email`, `send_password_reset`, `reset_password` now fully implemented using existing `password_reset_tokens` + `users.verification_token` DB columns
+- [x] **[GAP-E1-9]** Chat WebSocket `/ws/chat/{session_id}` was a mock (ACK only); rewritten to authenticate via `?token=` query param, subscribe to Redis PubSub `chat:{session_id}:events`, and forward real phase events from `ChatOrchestrator`
 
 ---
 
@@ -566,6 +575,10 @@ if not config.mcp_node_enabled:
 - [x] **[GAP-E2-3]** `fire_schedule` task never calls `SchedulerService.tick()` — body only logs `"Checked schedules"`; scheduled workflows will never fire even though Celery beat fires the task every 30 s → connect to `scheduler_service.tick()` from injected services
 - [x] **[GAP-E2-4]** `send_notification` task never dispatches — body only logs; no email/webhook/Slack dispatch occurs regardless of notification config → implement real dispatch via notification port
 - [x] **[GAP-E2-5]** `packages/workflow-worker/src/workflow_worker/tasks/` directory is empty — delete it (dead directory causes import ambiguity with `workflow_worker/tasks.py`)
+- [x] **[GAP-E2-6]** `NodeServices(cache=None)` in `dependencies.py` — `SetStateNode` silently skipped all Redis writes. Fixed: `RedisCache(client=aioredis.from_url(REDIS_URL))` wired in
+- [x] **[GAP-E2-7]** `execute_workflow` task signature `(self, run_id, tenant_id)` but API calls `.delay(run_id, tenant_id, workflow_id, input_data)` → `TypeError`. Fixed: added optional `workflow_id`, `input_data`, `resume_node`, `human_response` params
+- [x] **[GAP-E2-8]** `run.trigger_input` AttributeError — `ExecutionRun` field is `input_data` not `trigger_input`. Fixed
+- [x] **[GAP-E2-9]** Human-in-the-loop resume path missing in Celery task. Added: when `resume_node` + `human_response` present, calls `orchestrator.resume()` instead of `orchestrator.run()`
 
 ---
 
@@ -1078,7 +1091,26 @@ Everything else (auth, billing, connectors, CLI, frontend) can be built around t
 | GAP-E2-3 | 🔴 Critical | `packages/workflow-worker/src/workflow_worker/tasks.py` | `fire_schedule` never calls `SchedulerService.tick()` — scheduled workflows never fire | Wire to injected `scheduler_service.tick()` (FIX-16) |
 | GAP-E2-4 | 🟠 High | `packages/workflow-worker/src/workflow_worker/tasks.py` | `send_notification` never dispatches — logs only | Implement notification port dispatch (FIX-17) |
 | GAP-E2-5 | 🟡 Medium | `packages/workflow-worker/src/workflow_worker/tasks/` | Empty directory — causes import ambiguity with `tasks.py` | Delete empty directory (FIX-18) |
+| GAP-E2-6 | ✅ Fixed | `packages/workflow-worker/src/workflow_worker/dependencies.py` | `NodeServices(cache=None)` — `SetStateNode` silently skipped all Redis writes | Wired `RedisCache` — FIX-28 |
+| GAP-E2-7 | ✅ Fixed | `packages/workflow-worker/src/workflow_worker/tasks.py` | `execute_workflow(self, run_id, tenant_id)` only accepted 2 args; API calls `.delay(run_id, tenant_id, workflow_id, input_data)` → `TypeError` | Added `workflow_id`, `input_data`, `resume_node`, `human_response` params — FIX-29 |
+| GAP-E2-8 | ✅ Fixed | `packages/workflow-worker/src/workflow_worker/tasks.py` | `run.trigger_input` → `AttributeError`; field is `input_data` | Fixed field name — FIX-29 |
+| GAP-E2-9 | ✅ Fixed | `packages/workflow-worker/src/workflow_worker/tasks.py` | Human-in-the-loop resume path missing in Celery task | Added `orchestrator.resume()` branch — FIX-29 |
 | GAP-E3-1 | 🟡 Medium | `packages/workflow-cli/` + `docs/api/openapi.yaml` | Config path mismatch: CLI uses `.toml`, spec references `.yaml` | Update spec references to `.toml` (FIX-19) |
+| GAP-E1-3 | ✅ Fixed | `packages/workflow-api/src/workflow_api/main.py` | `WorkflowDefinition.nodes` is `dict` but POST body sent `[]` → 422; `description` field missing from model | Normalise list→dict in `PlatformWorkflowService`; add `description` to model — FIX-30 |
+| GAP-E1-4 | ✅ Fixed | `packages/workflow-api/src/workflow_api/routes/chat.py` | Double `/v1` prefix — routes landed at `/api/v1/v1/chat/sessions` | Changed prefix to `/chat/sessions` — FIX-31 |
+| GAP-E1-5 | ✅ Fixed | `packages/workflow-api/src/workflow_api/main.py` + `docs/api/openapi.yaml` | `ADMIN` role used in spec/code; correct enum is `OWNER/EDITOR/VIEWER` | Fixed throughout — FIX-31 |
+| GAP-E1-6 | ✅ Fixed | `packages/workflow-api/pyproject.toml` | `slowapi` imported in `app.py` but not in dependencies — `ImportError` on install | Added `slowapi>=0.1.9` — FIX-32 |
+| GAP-E1-7 | ✅ Fixed | `packages/workflow-api/src/workflow_api/main.py` | `PlatformWebhookService` was a stub (no DB); inbound webhooks not persisted | Replaced with asyncpg implementation after `002_webhooks.sql` — FIX-33 |
+| GAP-E1-8 | ✅ Fixed | `packages/workflow-api/src/workflow_api/main.py` | `verify_email`, `send_password_reset`, `reset_password` were pass/stub | Implemented using existing DB columns; `EmailService` added — FIX-34 |
+| GAP-E1-9 | ✅ Fixed | `packages/workflow-api/src/workflow_api/routes/chat.py` | WebSocket `/ws/chat/{session_id}` was mock — no auth, no real processing, ACK only | Rewritten with `?token=` auth + Redis PubSub subscription — FIX-35 |
+| GAP-D7-1 | ✅ Fixed | `packages/workflow-engine/src/workflow_engine/ports.py` | `CachePort.sadd()` had no body — `SyntaxError`; `smembers`/`sadd` ABCs missing | Added default methods to `CachePort`; implemented in `RedisCache` — FIX-36 |
+| GAP-D7-2 | ✅ Fixed | `packages/workflow-engine/src/workflow_engine/execution/orchestrator.py` | `NodeContext(state={})` always empty — `SetStateNode` writes not loaded for downstream nodes | Orchestrator pre-loads via `smembers` + `get` before each node — FIX-36 |
+| GAP-LLM-1 | ✅ Fixed | `packages/workflow-engine/src/workflow_engine/providers/google_genai.py` | Token counting used tiktoken estimation; native `count_tokens()` API and `usage_metadata` available | Added `complete_with_usage()` with native counting; `_count_tokens()` helper — FIX-37 |
+| GAP-LLM-2 | ✅ Fixed | `packages/workflow-engine/src/workflow_engine/providers/openai.py` | Token counting used tiktoken estimation; `response.usage` available natively | Added `complete_with_usage()` using `response.usage` — FIX-37 |
+| GAP-LLM-3 | ✅ Fixed | `packages/workflow-engine/src/workflow_engine/ports.py` | `LLMPort` had no usage-aware interface; nodes had no standard way to get token counts | Added `complete_with_usage()` default method to `LLMPort` ABC — FIX-37 |
+| GAP-DEP-1 | ✅ Fixed | all `pyproject.toml` files | `aioredis>=2.0` incompatible with Python 3.12; code already used `redis.asyncio` | Replaced `aioredis` with `redis[asyncio]>=5.0` in all packages — FIX-38 |
+| GAP-DEP-2 | ✅ Fixed | `packages/workflow-api/pyproject.toml` | `sendgrid` listed as hard dependency but SMTP implementation uses stdlib | Commented out `sendgrid`; `EmailService` uses stdlib `smtplib` — FIX-38 |
+| GAP-WEBHOOK-1 | ✅ Fixed | `infra/database/postgres/migrations/` | No `webhooks` table — webhook data had nowhere to persist | Created `002_webhooks.sql` with `webhooks` + `webhook_deliveries` tables — FIX-33 |
 | GAP-D7-1 | ✅ Verified | `packages/workflow-engine/src/workflow_engine/providers/` | ~~`providers/` is empty~~ — `google_genai.py`, `openai.py`, `factory.py`, `mock.py` confirmed present and implemented. Closed. | FIX-20 (✅ Done) |
 | GAP-INFRA-1 | ✅ Fixed | `infra/helm/.../deployment-worker.yaml` + `values.yaml` | Celery command and liveness probe used `workflow_worker.app` — actual module is `workflow_worker.celery_app`. Worker pods crash-loop on deploy. | Fixed — FIX-21 |
 | GAP-INFRA-2 | ✅ Fixed | `infra/helm/workflow-platform/` | No beat scheduler Deployment — `ScheduledTriggerNode` workflows silently never fire in production. `celery beat` has no K8s manifest. | Created `deployment-beat.yaml` + beat values — FIX-22 |
@@ -1119,6 +1151,17 @@ Everything else (auth, billing, connectors, CLI, frontend) can be built around t
 | FIX-25 | GAP-INFRA-5 | Create `packages/workflow-api/alembic.ini` + `alembic/env.py` + `alembic/versions/0001_initial_schema.py` wrapping `001_initial_schema.sql` — Alembic is now the authoritative migration runner | ✅ Done | — |
 | FIX-26 | GAP-INFRA-6 | Wire `ProviderFactory.from_config(config)` into `dependencies.py` → pass `llm=provider` to `NodeServices` | ✅ Done | FIX-20, FIX-14 |
 | FIX-27 | GAP-INFRA-7 | Complete `packages/workflow-api/src/workflow_api/main.py` `lifespan()` — all 9 service facades (auth, user, workflow, execution, schedule, audit, webhook, billing, chat) wired to `app.state`; LLM passed to `DAGGeneratorService`; connection pools closed on shutdown | ✅ Done | FIX-20, FIX-14 |
+| FIX-28 | GAP-E2-6 | Wire `RedisCache(client=aioredis.from_url(REDIS_URL))` into `NodeServices` in `worker/dependencies.py`; was `cache=None` | ✅ Done | — |
+| FIX-29 | GAP-E2-7,8,9 | Fix `execute_workflow` Celery task: add `workflow_id`, `input_data`, `resume_node`, `human_response` params; fix `run.trigger_input` → `run.input_data`; add `orchestrator.resume()` branch | ✅ Done | — |
+| FIX-30 | GAP-E1-3 | Normalize `nodes: [] → {}` in `PlatformWorkflowService.create()`; add `description: str\|None` to `WorkflowDefinition` | ✅ Done | — |
+| FIX-31 | GAP-E1-4,5 | Fix chat router prefix `/v1/chat/sessions` → `/chat/sessions`; fix `ADMIN` → `OWNER/EDITOR/VIEWER` in spec and code | ✅ Done | — |
+| FIX-32 | GAP-E1-6 | Add `slowapi>=0.1.9` to `workflow-api/pyproject.toml`; rate limiter was already wired in `app.py` | ✅ Done | — |
+| FIX-33 | GAP-E1-7, GAP-WEBHOOK-1 | Create `002_webhooks.sql` (webhooks + webhook_deliveries tables); replace `PlatformWebhookService` stub with asyncpg-backed implementation including HMAC verification and `execute_workflow.delay()` dispatch | ✅ Done | — |
+| FIX-34 | GAP-E1-8 | Add `EmailService` (stdlib `smtplib`, async via `run_in_executor`); implement `verify_email`, `send_password_reset`, `reset_password` using existing `password_reset_tokens` + `users.verification_token` columns | ✅ Done | — |
+| FIX-35 | GAP-E1-9 | Rewrite WebSocket `stream_chat`: authenticate via `?token=` query param; subscribe to Redis PubSub `chat:{session_id}:events`; `ChatOrchestrator.process_message()` now publishes phase events via optional `publish` callback | ✅ Done | FIX-36 |
+| FIX-36 | GAP-D7-1,2 | Add `smembers`/`sadd` default methods to `CachePort`; implement in `RedisCache`; orchestrator pre-loads `state_keys:{run_id}` via `smembers` + `get` before each node execution; `SetStateNode` tracks keys via `sadd` | ✅ Done | — |
+| FIX-37 | GAP-LLM-1,2,3 | Add `complete_with_usage()` to `LLMPort` (default wraps `complete()`); implement in `GoogleGenAIProvider` using `response.usage_metadata` + `client.models.count_tokens()`; implement in `OpenAIProvider` using `response.usage` | ✅ Done | — |
+| FIX-38 | GAP-DEP-1,2 | Replace `aioredis>=2.0` with `redis[asyncio]>=5.0` across all `pyproject.toml` files; comment out `sendgrid` hard dep; add inline note about `tiktoken` as fallback | ✅ Done | — |
 
 ---
 
@@ -1191,3 +1234,155 @@ When blocked:
 | A-1 | Pydantic domain models | 🚫 Blocked | @dev-name | 2026-04-01 | — |
 ```
 > **Blocker:** Waiting for decision on enum values for `plan_tier` — pending stakeholder input.
+
+---
+
+## Phase 8 — Production Hardening (Post-Backend-Complete)
+
+> **Completed:** 2026-04-01  
+> **Depends on:** E-1, E-2 complete (backend is ready for frontend integration)  
+> These tasks close the three HIGH-severity gaps identified in the final pre-frontend audit.
+
+| # | Task | Status | Completed | Gap IDs |
+|---|------|--------|-----------|---------|
+| H-1 | **Chat WebSocket — Redis PubSub streaming** | ✅ Done | 2026-04-01 | GAP-E1-9 |
+| H-2 | **Webhooks DB persistence** | ✅ Done | 2026-04-01 | GAP-E1-7, GAP-WEBHOOK-1 |
+| H-3 | **Email/SMTP — verification + password reset** | ✅ Done | 2026-04-01 | GAP-E1-8 |
+| H-4 | **Native LLM token counting** | ✅ Done | 2026-04-01 | GAP-LLM-1,2,3 |
+| H-5 | **Dependency cleanup** | ✅ Done | 2026-04-01 | GAP-DEP-1,2, GAP-E1-6 |
+
+### H-1 — Chat WebSocket Streaming
+
+**Files changed:**
+- `packages/workflow-engine/src/workflow_engine/chat/orchestrator.py` — `process_message()` accepts optional `publish: Callable[[str, dict], Awaitable[None]]`; emits 4 real-time events via internal `_emit()` helper
+- `packages/workflow-api/src/workflow_api/routes/chat.py` — WebSocket rewrites to: (1) authenticate via `?token=<jwt>` query param, (2) subscribe to Redis PubSub `chat:{session_id}:events`, (3) spawn `process_message()` as background task on client message, (4) forward PubSub events to WebSocket client in real time
+- `packages/workflow-api/src/workflow_api/main.py` — exposes `app.state.redis_client` for WebSocket handler
+
+**WebSocket event protocol (server → client):**
+```json
+{"type": "status",   "phase": "PROCESSING"}
+{"type": "phase",    "phase": "CLARIFYING"}
+{"type": "phase",    "phase": "GENERATING"}
+{"type": "response", "phase": "COMPLETE", "message": "...", "workflow_id": "wf_..."}
+```
+
+**Connect URL:** `wss://{host}/api/v1/chat/sessions/ws/chat/{session_id}?token=<jwt>`
+
+**Acceptance criteria:**
+- [x] WebSocket authenticates via `?token=` query param — 4001 close code on missing/invalid token
+- [x] Client sends `{"type": "message", "content": "..."}` → `process_message()` called with real PubSub publisher
+- [x] `PROCESSING`, `CLARIFYING`, `GENERATING`, `COMPLETE` events delivered to client as they occur
+- [x] REST `POST /{session_id}/message` still works (backward-compatible — `publish=None`)
+- [x] WebSocket cleanup: PubSub unsubscribed + both asyncio tasks cancelled on disconnect
+
+---
+
+### H-2 — Webhooks DB Persistence
+
+**Files changed:**
+- `infra/database/postgres/migrations/002_webhooks.sql` (new) — `webhooks` + `webhook_deliveries` tables with indexes and `updated_at` trigger
+- `packages/workflow-api/src/workflow_api/main.py` — `PlatformWebhookService` replaced with asyncpg-backed implementation
+
+**`webhooks` table columns:** `id, tenant_id, workflow_id, name, events[], webhook_secret, endpoint_url, active, created_at, updated_at`
+
+**`webhook_deliveries` table columns:** `id, webhook_id, tenant_id, workflow_id, event_type, payload (JSONB), response_status, delivered_at`
+
+**Inbound webhook flow:**
+1. `POST /api/v1/webhooks/inbound/{workflow_id}` received
+2. Look up active webhook for `workflow_id`
+3. If `webhook_secret` set and `X-Webhook-Signature` header present → HMAC-SHA256 verify
+4. `execute_workflow.delay(run_id, tenant_id, workflow_id, body)` dispatched
+5. Insert row into `webhook_deliveries` (best-effort; failure does not reject request)
+6. Return `{"accepted": true, "workflow_id": ..., "run_id": ...}`
+
+**Acceptance criteria:**
+- [x] `POST /webhooks` creates row in `webhooks` table; returns plaintext secret only at creation
+- [x] `POST /webhooks/inbound/{id}` with valid HMAC signature dispatches Celery task
+- [x] `POST /webhooks/inbound/{id}` with invalid HMAC returns `{"accepted": false, "reason": "Invalid webhook signature"}`
+- [x] Delivery logged to `webhook_deliveries` on every inbound call
+- [x] `DELETE /webhooks/{id}` sets `active = false` (soft delete)
+- [x] Run migration `002_webhooks.sql` before starting API — apply with `alembic upgrade head`
+
+---
+
+### H-3 — Email/SMTP
+
+**Files changed:**
+- `packages/workflow-api/src/workflow_api/main.py` — added `EmailService` class; wired `verify_email`, `send_password_reset`, `reset_password`
+
+**EmailService configuration (env vars):**
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `SMTP_HOST` | (unset) | SMTP server hostname. Email disabled if not set |
+| `SMTP_PORT` | `587` | SMTP port (STARTTLS) |
+| `SMTP_USER` | (unset) | SMTP username |
+| `SMTP_PASSWORD` | (unset) | SMTP password |
+| `EMAIL_FROM` | `noreply@dkplatform.io` | Sender address |
+| `APP_URL` | `http://localhost:3000` | Base URL for verification/reset links |
+
+**Email flows implemented:**
+- `register()` → sends verification email with 24h token link
+- `verify_email(token)` → marks `users.is_verified = true`, clears token
+- `send_password_reset(email)` → creates `password_reset_tokens` row, sends 1h reset link
+- `reset_password(token, password)` → validates token, updates `password_hash`, marks token used
+
+**Acceptance criteria:**
+- [x] `POST /auth/register` triggers verification email when `SMTP_HOST` is set
+- [x] `POST /auth/verify-email?token=<valid>` marks user verified
+- [x] `POST /auth/verify-email?token=<expired>` returns 400
+- [x] `POST /auth/password/reset-request` sends email; does not reveal whether email exists
+- [x] `POST /auth/password/reset` with used token returns 400
+- [x] `EmailService` logs intent and returns `False` gracefully when `SMTP_HOST` not set (no crash)
+- [x] Uses stdlib `smtplib` — no extra dependency required
+
+---
+
+### H-4 — Native LLM Token Counting
+
+**Files changed:**
+- `packages/workflow-engine/src/workflow_engine/ports.py` — `LLMPort.complete_with_usage()` default method
+- `packages/workflow-engine/src/workflow_engine/providers/google_genai.py` — native implementation
+- `packages/workflow-engine/src/workflow_engine/providers/openai.py` — native implementation
+
+**`complete_with_usage()` return schema:**
+```python
+{
+    "text": str,           # completion text
+    "input_tokens": int,   # prompt token count (native API)
+    "output_tokens": int,  # completion token count (native API)
+    "thoughts_tokens": int # reasoning tokens (Gemini only; 0 for all others)
+}
+```
+
+**Google GenAI:** uses `response.usage_metadata.prompt_token_count` / `candidates_token_count` / `thoughts_token_count` — no `tiktoken` needed. `count_tokens()` helper also available for pre-call counting.
+
+**OpenAI:** uses `response.usage.prompt_tokens` / `completion_tokens` directly from API response.
+
+**Backward compatibility:** `complete()` is unchanged — all existing nodes continue working. Nodes opt in to usage tracking by calling `complete_with_usage()` instead.
+
+**Acceptance criteria:**
+- [x] `GoogleGenAIProvider.complete_with_usage()` returns non-zero `input_tokens` and `output_tokens`
+- [x] `GoogleGenAIProvider.count_tokens("hello world")` returns a positive integer
+- [x] `OpenAIProvider.complete_with_usage()` returns non-zero token counts from `response.usage`
+- [x] Default `LLMPort.complete_with_usage()` returns `{"text": ..., "input_tokens": 0, ...}` (graceful fallback)
+- [x] `PromptNode` can call `complete_with_usage()` and pass token counts to `UsageRecorder`
+
+---
+
+### H-5 — Dependency Cleanup
+
+**Files changed:**
+- `packages/workflow-engine/pyproject.toml` — `aioredis` → `redis[asyncio]>=5.0`; tiktoken comment updated
+- `packages/workflow-api/pyproject.toml` — `aioredis` removed; `redis[asyncio]>=5.0` added; `slowapi>=0.1.9` added; `sendgrid` commented out
+- `packages/workflow-worker/pyproject.toml` — `aioredis` → `redis[asyncio]>=5.0`
+
+**Rationale:**
+- `aioredis>=2.0` is incompatible with Python 3.12 (`asyncio.get_event_loop()` removed). All code already uses `redis.asyncio` (from the `redis>=5` package). Removing `aioredis` eliminates the import confusion and the CI breakage
+- `slowapi` was already wired in `app.py` (rate limiter middleware fully implemented) but missing from deps — this caused `ImportError` on install
+- `sendgrid` was a hard dependency but `EmailService` uses stdlib `smtplib` — removing it avoids an unnecessary paid API dependency
+
+**Acceptance criteria:**
+- [x] `pip install -e packages/workflow-engine` succeeds with Python 3.12
+- [x] `pip install -e packages/workflow-api` succeeds and `from slowapi import Limiter` works
+- [x] No `aioredis` import anywhere in source (grep confirms)
+- [x] All Redis operations use `import redis.asyncio as aioredis` pattern

@@ -21,13 +21,16 @@ class SetStateNode(BaseNodeType):
         mappings: dict[str, str] = dict(config.get("mappings") or {})
         updated_state: dict[str, Any] = {}
 
+        import json
         for state_key, input_field in mappings.items():
             value = context.input_data.get(input_field, context.input_data.get(state_key))
             updated_state[state_key] = value
 
             if services.cache:
                 full_key = f"state:{context.run_id}:{state_key}"
-                import json
                 await services.cache.set(full_key, json.dumps(value), ttl_seconds=_STATE_TTL)
+                # Track which keys exist for this run so orchestrator can auto-load context.state
+                tracker_key = f"state_keys:{context.run_id}"
+                await services.cache.sadd(tracker_key, state_key, ttl_seconds=_STATE_TTL)
 
         return NodeOutput(outputs={"state": updated_state}, metadata={"keys_set": list(updated_state.keys())})

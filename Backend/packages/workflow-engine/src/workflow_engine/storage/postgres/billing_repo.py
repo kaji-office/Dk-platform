@@ -69,17 +69,18 @@ class PostgresBillingRepository:
 
     async def get_monthly_run_count(self, tenant_id: str, year: int, month: int) -> int:
         """Count unique runs triggered by a tenant in a calendar month."""
-        start_date = f"{year}-{month:02d}-01"
+        from datetime import date as _date
+        start_date = _date(year, month, 1)
         if month == 12:
-            end_date = f"{year+1}-01-01"
+            end_date = _date(year + 1, 1, 1)
         else:
-            end_date = f"{year}-{month+1:02d}-01"
-            
+            end_date = _date(year, month + 1, 1)
+
         # We rely on node_exec_records to approximate "runs" assuming they execute at least one node
         query = """
             SELECT COUNT(DISTINCT run_id)
             FROM node_exec_records
-            WHERE tenant_id = $1 AND timestamp >= $2::timestamp AND timestamp < $3::timestamp
+            WHERE tenant_id = $1 AND started_at >= $2 AND started_at < $3
         """
         val = await self._pool.fetchval(query, tenant_id, start_date, end_date)
         return val or 0

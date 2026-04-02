@@ -15,8 +15,8 @@ class RunStatus(StrEnum):
 
 class NodeExecutionState(BaseModel):
     status: RunStatus = Field(default=RunStatus.QUEUED)
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
     error: str | None = None
     outputs: dict[str, Any] = Field(default_factory=dict)
 
@@ -29,5 +29,5 @@ class ExecutionRun(BaseModel):
     output_data: dict[str, Any] = Field(default_factory=dict)
     node_states: dict[str, NodeExecutionState] = Field(default_factory=dict)
     error: str | None = None
-    start_time: datetime | None = None
-    end_time: datetime | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None

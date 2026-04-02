@@ -10,3 +10,5 @@ class ScheduleModel(BaseModel):
     timezone: str = Field(default="UTC")
     next_fire_at: datetime | None = None
     is_active: bool = Field(default=True)
+    tenant_id: str | None = None
+    input_data: dict = Field(default_factory=dict)

@@ -14,12 +14,11 @@ dependencies = [
 
     # Task queue
     "celery[redis]>=5.4,<6",
-    "redis>=5.0,<6",
+    "redis[asyncio]>=5.0,<6",           # redis.asyncio replaces aioredis (Python 3.12 compat)
     "kombu>=5.3,<6",
 
     # Database clients
     "motor>=3.4,<4",
-    "aioredis>=2.0,<3",
     "asyncpg>=0.29,<1",
 
     # AWS
