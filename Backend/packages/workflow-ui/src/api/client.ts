@@ -73,14 +73,22 @@ apiClient.interceptors.response.use(
 
       isRefreshing = true
       try {
-        // POST /auth/token/refresh — cookie is sent automatically (withCredentials)
+        // Read stored refresh token and send in body (backend requires it)
+        const { getRefreshToken, setAccessToken } = require('@/stores/authStore').useAuthStore.getState()
+        const storedRefreshToken = getRefreshToken()
+
+        if (!storedRefreshToken) {
+          throw new Error('No refresh token available')
+        }
+
+        // POST /auth/token/refresh — send refresh_token in body
         const { data } = await apiClient.post<{ data: { access_token: string } }>(
           '/api/v1/auth/token/refresh',
+          { refresh_token: storedRefreshToken },
         )
         const newToken = data.data.access_token
 
         // Store new token in authStore
-        const { setAccessToken } = require('@/stores/authStore').useAuthStore.getState()
         setAccessToken(newToken)
 
         // Flush queued requests

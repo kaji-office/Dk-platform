@@ -13,16 +13,18 @@ import type { User } from '@/types/api'
 interface AuthState {
   // In-memory access token (not persisted)
   _accessToken: string | null
+  _refreshToken: string | null
 
   user: User | null
   isAuthenticated: boolean
 
   // Called by login / register mutations
-  setAuth: (token: string, user: User) => void
+  setAuth: (token: string, refreshToken: string, user: User) => void
 
   // Called by token refresh interceptor
   setAccessToken: (token: string) => void
   getAccessToken: () => string | null
+  getRefreshToken: () => string | null
 
   // Called on logout or refresh failure
   logout: () => void
@@ -32,20 +34,22 @@ export const useAuthStore = create<AuthState>()(
   devtools(
     (set, get) => ({
       _accessToken: null,
+      _refreshToken: null,
       user: null,
       isAuthenticated: false,
 
-      setAuth: (token, user) =>
-        set({ _accessToken: token, user, isAuthenticated: true }, false, 'auth/setAuth'),
+      setAuth: (token, refreshToken, user) =>
+        set({ _accessToken: token, _refreshToken: refreshToken, user, isAuthenticated: true }, false, 'auth/setAuth'),
 
       setAccessToken: (token) =>
         set({ _accessToken: token }, false, 'auth/setAccessToken'),
 
       getAccessToken: () => get()._accessToken,
+      getRefreshToken: () => get()._refreshToken,
 
       logout: () =>
         set(
-          { _accessToken: null, user: null, isAuthenticated: false },
+          { _accessToken: null, _refreshToken: null, user: null, isAuthenticated: false },
           false,
           'auth/logout',
         ),

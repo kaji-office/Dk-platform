@@ -11,8 +11,8 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
-import type { ChatSession, ChatMessageResponse, ApiResponse } from '@/types/chat'
-import type { WorkflowDefinition } from '@/types/api'
+import type { ChatSession, ChatMessageResponse } from '@/types/chat'
+import type { WorkflowDefinition, ApiResponse } from '@/types/api'
 
 // ── Query keys ────────────────────────────────────────────────────────────────
 
@@ -28,10 +28,11 @@ export function useChatSessions() {
   return useQuery({
     queryKey: chatKeys.sessions(),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<ChatSession[]>>(
+      // Backend returns { sessions: ChatSession[] }
+      const { data } = await apiClient.get<{ sessions: ChatSession[] }>(
         '/api/v1/chat/sessions',
       )
-      return data.data
+      return data.sessions ?? []
     },
   })
 }
@@ -44,13 +45,13 @@ export function useChatSession(sessionId: string | null) {
   return useQuery({
     queryKey: chatKeys.session(sessionId ?? ''),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<ChatMessageResponse>>(
+      // Backend returns ChatSession directly (no ApiResponse wrapper)
+      const { data } = await apiClient.get<ChatMessageResponse>(
         `/api/v1/chat/sessions/${sessionId}`,
       )
-      return data.data
+      return data
     },
     enabled: Boolean(sessionId),
-    // Don't auto-refetch — triggered manually after WS events
     staleTime: Infinity,
   })
 }
@@ -61,10 +62,12 @@ export function useCreateChatSession() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async () => {
-      const { data } = await apiClient.post<ApiResponse<{ session_id: string; phase: string }>>(
+      // Backend returns ChatSession directly (no ApiResponse wrapper)
+      const { data } = await apiClient.post<{ id: string; session_id?: string; phase: string }>(
         '/api/v1/chat/sessions',
       )
-      return data.data
+      // session id may be in 'id' or 'session_id' field
+      return { session_id: data.session_id ?? data.id, phase: data.phase }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: chatKeys.sessions() }),
   })
@@ -76,14 +79,14 @@ export function useSendMessage(sessionId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (content: string) => {
-      const { data } = await apiClient.post<ApiResponse<ChatMessageResponse>>(
+      // Backend returns the response dict directly (no ApiResponse wrapper)
+      const { data } = await apiClient.post<ChatMessageResponse>(
         `/api/v1/chat/sessions/${sessionId}/message`,
         { content },
       )
-      return data.data
+      return data
     },
     onSuccess: (response) => {
-      // Immediately update the session cache with the latest state
       qc.setQueryData(chatKeys.session(sessionId), response)
     },
   })
@@ -95,10 +98,11 @@ export function useForceGenerate(sessionId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async () => {
-      const { data } = await apiClient.post<ApiResponse<ChatMessageResponse>>(
+      // Backend returns { workflow_id, workflow } directly
+      const { data } = await apiClient.post<{ workflow_id: string; workflow: WorkflowDefinition }>(
         `/api/v1/chat/sessions/${sessionId}/generate`,
       )
-      return data.data
+      return data
     },
     onSuccess: (response) => {
       qc.setQueryData(chatKeys.session(sessionId), response)
@@ -112,15 +116,14 @@ export function useForceGenerate(sessionId: string) {
 export function useUpdateChatWorkflow(sessionId: string) {
   return useMutation({
     mutationFn: async (workflow: WorkflowDefinition) => {
-      const { data } = await apiClient.put<
-        ApiResponse<{
-          valid: boolean
-          workflow: WorkflowDefinition
-          validation_errors?: Array<{ code: string; message: string; node_id: string | null }>
-          suggestions?: string[]
-        }>
-      >(`/api/v1/chat/sessions/${sessionId}/workflow`, { workflow })
-      return data.data
+      // Backend returns validation result directly
+      const { data } = await apiClient.put<{
+        valid: boolean
+        workflow: WorkflowDefinition
+        validation_errors?: Array<{ code: string; message: string; node_id: string | null }>
+        suggestions?: string[]
+      }>(`/api/v1/chat/sessions/${sessionId}/workflow`, { workflow })
+      return data
     },
   })
 }

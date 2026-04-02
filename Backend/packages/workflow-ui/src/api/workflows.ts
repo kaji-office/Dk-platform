@@ -21,8 +21,9 @@ export function useWorkflows() {
   return useQuery({
     queryKey: workflowKeys.list(),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<Workflow[]>>('/api/v1/workflows')
-      return data.data
+      // Backend returns { workflows: Workflow[], skip: number, limit: number }
+      const { data } = await apiClient.get<{ workflows: Workflow[]; skip: number; limit: number }>('/api/v1/workflows')
+      return data.workflows ?? []
     },
   })
 }

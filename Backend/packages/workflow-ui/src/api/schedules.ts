@@ -17,10 +17,11 @@ export function useSchedules() {
   return useQuery({
     queryKey: scheduleKeys.list(),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<WorkflowSchedule[]>>(
+      // Backend returns { schedules: WorkflowSchedule[] }
+      const { data } = await apiClient.get<{ schedules: WorkflowSchedule[] }>(
         '/api/v1/schedules',
       )
-      return data.data
+      return data.schedules ?? []
     },
   })
 }

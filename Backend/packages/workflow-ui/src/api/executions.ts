@@ -30,10 +30,11 @@ export function useExecutions(filters?: { workflow_id?: string; status?: string 
   return useQuery({
     queryKey: executionKeys.list(filters),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<ExecutionRun[]>>('/api/v1/executions', {
+      // Backend returns { executions: ExecutionRun[], skip, limit }
+      const { data } = await apiClient.get<{ executions: ExecutionRun[]; skip: number; limit: number }>('/api/v1/executions', {
         params: filters,
       })
-      return data.data
+      return data.executions ?? []
     },
   })
 }
@@ -88,10 +89,11 @@ export function useExecutionNodes(runId: string) {
   return useQuery({
     queryKey: executionKeys.nodes(runId),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<NodeExecution[]>>(
+      // Backend returns { nodes: NodeExecution[] }
+      const { data } = await apiClient.get<{ nodes: NodeExecution[] }>(
         `/api/v1/executions/${runId}/nodes`,
       )
-      return data.data
+      return data.nodes ?? []
     },
     enabled: Boolean(runId),
   })
@@ -103,10 +105,11 @@ export function useExecutionLogs(runId: string) {
   return useQuery({
     queryKey: executionKeys.logs(runId),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<ExecutionLog[]>>(
+      // Backend returns { logs: ExecutionLog[], run_id: string }
+      const { data } = await apiClient.get<{ logs: ExecutionLog[]; run_id: string }>(
         `/api/v1/executions/${runId}/logs`,
       )
-      return data.data
+      return data.logs ?? []
     },
     enabled: Boolean(runId),
   })
