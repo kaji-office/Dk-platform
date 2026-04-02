@@ -1,26 +1,29 @@
 # DK Platform — Quickstart Guide
 
-> **Backend status:** Structurally complete. One wiring gap in `main.py`
-> (`auth_service` not attached to `app.state`) must be patched before
-> protected routes work. Step 6 covers this fix.
->
-> **Time to first API call:** ~15 minutes on a clean machine.
+Choose the setup path that matches your environment:
+
+| Path | Best for | Requires |
+|---|---|---|
+| **[A] Make](#path-a--make-recommended)** | Fastest start — one-liners | Python 3.12, Docker |
+| **[B] Docker Compose (manual)](#path-b--docker-compose-no-make)** | Portable, no Make | Python 3.12, Docker |
+| **[C] Native services](#path-c--native-services-no-docker)** | Already have Postgres/Mongo/Redis running | Python 3.12, running services |
+
+Steps 1–3 (clone, keys, `.env`) are identical for all paths — only the **infrastructure** setup differs.
 
 ---
 
 ## Prerequisites
 
-| Tool | Minimum version | Check |
+| Tool | Version | Check |
 |---|---|---|
-| Python | 3.12 | `python --version` |
-| Docker + Compose | Docker 24, Compose v2 | `docker compose version` |
-| Node.js | 18 LTS | `node --version` (frontend only) |
-| npm | 9 | `npm --version` (frontend only) |
+| Python | 3.12+ | `python3 --version` |
 | OpenSSL | any | `openssl version` |
+| Docker + Compose v2 | 24+ | `docker compose version` *(paths A & B only)* |
+| Node.js | 18 LTS | `node --version` *(frontend only)* |
 
 ---
 
-## 1. Clone and enter the repo
+## Step 1 — Clone
 
 ```bash
 git clone <repo-url> dk-platform
@@ -29,428 +32,586 @@ cd dk-platform
 
 ---
 
-## 2. Generate JWT key pair
+## Step 2 — Generate JWT key pair
 
-RS256 signed tokens require a private/public key pair. Generate them once:
+RS256 tokens require a private/public key pair. Run once:
 
 ```bash
-make keys
+mkdir -p keys
+openssl genrsa -out keys/private.pem 2048
+openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ```
 
-This creates `keys/private.pem` and `keys/public.pem`. **Never commit these files.**
+> `keys/` is git-ignored. Never commit these files.
 
 ---
 
-## 3. Create your `.env`
+## Step 3 — Configure `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and fill in the **required** values. Everything else can stay as the default for local development.
+Open `.env` and fill in these sections:
 
-### Required — fill these in
+### LLM provider key (at least one required)
 
 ```bash
-# At least one LLM provider key (Gemini is the default model)
-ANTHROPIC_API_KEY=sk-ant-...        # OR
-OPENAI_API_KEY=sk-...               # OR
-# For Gemini: set GOOGLE_APPLICATION_CREDENTIALS or use vertex:
+ANTHROPIC_API_KEY=sk-ant-...        # Claude — recommended
+# OR
+OPENAI_API_KEY=sk-...               # GPT-4o
+# OR — Gemini (platform default model)
 VERTEX_AI_PROJECT=your-gcp-project
 VERTEX_AI_LOCATION=us-central1
 ```
 
-> **Minimum viable:** Add only `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` to get
-> the AI nodes working. The platform defaults to `gemini-2.0-flash` — if you
-> only have an OpenAI key, set `DEFAULT_LLM_PROVIDER=openai` in `.env`.
+If using OpenAI as default, also add:
+```bash
+DEFAULT_LLM_PROVIDER=openai
+```
 
-### Pre-filled for local Docker (leave as-is)
+### JWT keys
 
 ```bash
+JWT_PRIVATE_KEY_PATH=./keys/private.pem
+JWT_PUBLIC_KEY_PATH=./keys/public.pem
+JWT_REFRESH_SECRET=<run: openssl rand -hex 32>
+```
+
+### Infrastructure URLs
+
+Set these based on your chosen path:
+
+**Path A or B (Docker):**
+```bash
 MONGODB_URL=mongodb://localhost:27017/workflow_platform
+POSTGRES_URL=postgresql://workflow:devpassword@localhost:5432/workflow_platform
 POSTGRES_URL_ASYNCPG=postgresql+asyncpg://workflow:devpassword@localhost:5432/workflow_platform
-REDIS_URL=redis://:devpassword@localhost:6379/0
-CELERY_BROKER_URL=redis://:devpassword@localhost:6379/0
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/1
 S3_BUCKET=workflow-platform-dev
 AWS_ENDPOINT_URL=http://localhost:4566
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
-JWT_PRIVATE_KEY_PATH=./keys/private.pem
-JWT_PUBLIC_KEY_PATH=./keys/public.pem
+```
+
+**Path C (native services — no Redis password):**
+```bash
+MONGODB_URL=mongodb://localhost:27017/workflow_platform
+POSTGRES_URL=postgresql://workflow:devpassword@localhost:5432/workflow_platform
+POSTGRES_URL_ASYNCPG=postgresql+asyncpg://workflow:devpassword@localhost:5432/workflow_platform
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/1
+```
+
+### Optional — SMTP (email verification + password reset)
+
+Omitting `SMTP_HOST` is fine for development — the platform starts normally and skips sending emails:
+
+```bash
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=your-app-password
+EMAIL_FROM=noreply@example.com
+APP_URL=http://localhost:3000
 ```
 
 ---
 
-## 4. Start infrastructure
+## Path A — Make (recommended)
+
+> Requires: Python 3.12, Docker, Make
+
+### A1. Start infrastructure
 
 ```bash
 make dev
 ```
 
-This starts 6 containers in the background:
+Starts 6 containers in the background:
 
-| Container | Port | What it is |
+| Container | Port | What |
 |---|---|---|
 | `wf_postgres` | 5432 | PostgreSQL 16 + pgvector |
 | `wf_mongodb` | 27017 | MongoDB 7 |
-| `wf_redis` | 6379 | Redis 7 (broker + cache) |
-| `wf_localstack` | 4566 | LocalStack S3 emulation |
+| `wf_redis` | 6379 | Redis 7 |
+| `wf_localstack` | 4566 | S3 (LocalStack) |
 | `wf_flower` | 5555 | Celery task monitor |
 | `wf_mongo_express` | 8081 | MongoDB UI |
 
 Wait until all containers are healthy:
-
 ```bash
 docker compose -f docker-compose.dev.yml ps
 # All rows should show (healthy)
 ```
 
----
-
-## 5. Install Python packages
+### A2. Install Python packages
 
 ```bash
 make install-dev
 ```
 
-This installs all four packages in editable mode with dev dependencies:
-- `workflow-engine` — SDK (all business logic)
-- `workflow-api` — FastAPI delivery layer
-- `workflow-worker` — Celery delivery layer
-- `workflow-cli` — CLI delivery layer
-
----
-
-## 6. Apply the `auth_service` wiring patch
-
-`main.py` bootstraps the app but does not attach `auth_service` to `app.state`.
-Every protected route calls `request.app.state.auth_service.verify_token()` —
-without this patch all non-health endpoints return a 500.
-
-Open `packages/workflow-api/src/workflow_api/main.py` and replace the
-`lifespan` function body with the version below:
-
-```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    from workflow_engine.config import EngineConfig
-    from workflow_engine.storage.factory import RepositoryFactory
-    from workflow_engine.auth.jwt_service import JWTService
-    from workflow_engine.auth.api_key_service import APIKeyService
-    from workflow_engine.chat.orchestrator import ChatOrchestrator
-    from workflow_engine.chat.dag_generator import DAGGeneratorService
-    from workflow_engine.providers.factory import ProviderFactory
-
-    logger.info("Starting DK Workflow Engine API...")
-    config = EngineConfig()
-
-    repos   = await RepositoryFactory.create_all(config)
-    llm     = ProviderFactory.from_config(config.llm_providers)
-
-    # ── Auth services (required by dependencies.py) ────────────────────────
-    app.state.auth_service    = JWTService(config)
-    app.state.api_key_service = APIKeyService(repos.users)
-
-    # ── Domain services ────────────────────────────────────────────────────
-    app.state.workflow_repo   = repos.workflows
-    app.state.execution_repo  = repos.executions
-    app.state.schedule_repo   = repos.schedules
-    app.state.audit_repo      = repos.audit
-
-    # ── Chat (Phase 7) ─────────────────────────────────────────────────────
-    generator               = DAGGeneratorService(llm)
-    app.state.chat_orchestrator = ChatOrchestrator(
-        repo=repos.chat_sessions,
-        workflow_repo=repos.workflows,
-        generator=generator,
-    )
-
-    app.state.repos = repos
-    logger.info("API startup complete.")
-    yield
-
-    logger.info("Shutting down...")
-```
-
-> This is tracked as **FIX-13 / GAP-E1-2** in `TASKS.md`. Once merged to
-> `develop`, this step disappears.
-
----
-
-## 7. Run database migrations
+### A3. Run migrations
 
 ```bash
 make migrate
 ```
 
-This runs:
-1. Alembic `upgrade head` — creates all PostgreSQL tables (tenants, users, executions, billing, schedules, etc.)
-2. MongoDB index bootstrap — creates compound indexes for workflows, executions, chat sessions
+This runs Alembic (`upgrade head`) and bootstraps MongoDB indexes.
 
----
+Apply the webhooks table migration manually (not yet in Alembic):
+```bash
+docker exec -i wf_postgres psql -U workflow -d workflow_platform \
+  < infra/database/postgres/migrations/002_webhooks.sql
+```
 
-## 8. Start the API server
-
-In a new terminal:
+### A4. Start the API server
 
 ```bash
 make run-api
 ```
 
-Expected output:
-```
-INFO:     Started server process
-INFO:     Waiting for application startup.
-INFO     Starting DK Workflow Engine API...
-INFO     Initializing Repository Factory...
-INFO     API startup complete.
-INFO:     Application startup complete.
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+### A5. Start the Celery worker (new terminal)
+
+```bash
+make run-worker
 ```
 
-Verify it's running:
+### A6. Start Celery beat — for scheduled triggers (new terminal)
+
+```bash
+make run-scheduler
+```
+
+### A7. Verify
 
 ```bash
 curl http://localhost:8000/health
 # {"status":"healthy","version":"1.0.0","checks":{"postgres":"ok","mongodb":"ok","redis":"ok"}}
 ```
 
-Interactive API docs: **http://localhost:8000/docs**
+Open **http://localhost:8000/docs** for the interactive API explorer.
 
----
-
-## 9. Start the Celery worker
-
-In another new terminal:
+### Stopping
 
 ```bash
-make run-worker
-```
-
-Expected output:
-```
-[tasks]
-  . workflow_worker.tasks.execute_workflow
-  . workflow_worker.tasks.execute_node
-  . workflow_worker.tasks.fire_schedule
-  . workflow_worker.tasks.send_notification
-  . workflow_worker.tasks.handle_dlq
-
-[2026-03-31 ...] celery@hostname ready.
+make dev-down          # stop containers, keep data volumes
+# OR to wipe all data:
+docker compose -f docker-compose.dev.yml down -v
 ```
 
 ---
 
-## 10. Start the Celery beat scheduler
+## Path B — Docker Compose (no Make)
 
-In another terminal (needed for scheduled triggers):
+> Requires: Python 3.12, Docker Compose v2
+
+### B1. Start infrastructure
 
 ```bash
-make run-scheduler
+docker compose -f docker-compose.dev.yml up -d
+```
+
+Wait until healthy:
+```bash
+docker compose -f docker-compose.dev.yml ps
+```
+
+### B2. Create and activate a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+```
+
+### B3. Install Python packages
+
+```bash
+pip install -e "packages/workflow-engine[dev]"
+pip install -e "packages/workflow-api[dev]"
+pip install -e "packages/workflow-worker[dev]"
+pip install -e "packages/workflow-cli[dev]"
+```
+
+### B4. Run migrations
+
+The PostgreSQL container auto-applies `001_initial_schema.sql` on first start.
+Apply the webhooks migration and run Alembic for subsequent changes:
+
+```bash
+docker exec -i wf_postgres psql -U workflow -d workflow_platform \
+  < infra/database/postgres/migrations/002_webhooks.sql
+
+cd packages/workflow-api && alembic upgrade head && cd ../..
+```
+
+Bootstrap MongoDB indexes:
+```bash
+python -m workflow_engine.infra.mongodb_indexes
+```
+
+### B5. Start the API server
+
+```bash
+uvicorn workflow_api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### B6. Start the Celery worker (new terminal)
+
+```bash
+source .venv/bin/activate
+celery -A workflow_worker.celery_app worker \
+  --loglevel=info \
+  --queues=default,ai-heavy,critical,scheduled \
+  --concurrency=4
+```
+
+### B7. Start Celery beat — for scheduled triggers (new terminal)
+
+```bash
+source .venv/bin/activate
+celery -A workflow_worker.celery_app beat \
+  --loglevel=info \
+  --scheduler celery.beat:PersistentScheduler
+```
+
+### B8. Verify
+
+```bash
+curl http://localhost:8000/health
+```
+
+### Stopping
+
+```bash
+docker compose -f docker-compose.dev.yml down          # keep data
+docker compose -f docker-compose.dev.yml down -v       # wipe data
 ```
 
 ---
 
-## 11. Verify end-to-end
+## Path C — Native services (no Docker)
 
-### Register your first account
+> Requires: Python 3.12, MongoDB + PostgreSQL + Redis already running as system services
+
+**Expected connection details:**
+
+| Service | Port | Credentials |
+|---|---|---|
+| PostgreSQL | 5432 | user: `workflow`, password: `devpassword`, db: `workflow_platform` |
+| MongoDB | 27017 | no auth |
+| Redis | 6379 | no password |
+
+### C1. Create the PostgreSQL database and user
+
+Skip if already done:
 
 ```bash
-curl -s -X POST http://localhost:8000/auth/register \
+sudo -u postgres psql <<'SQL'
+CREATE USER workflow WITH PASSWORD 'devpassword';
+CREATE DATABASE workflow_platform OWNER workflow;
+GRANT ALL PRIVILEGES ON DATABASE workflow_platform TO workflow;
+SQL
+```
+
+Enable required extensions (requires `postgresql-<ver>-pgvector`):
+
+```bash
+psql postgresql://workflow:devpassword@localhost:5432/workflow_platform <<'SQL'
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS vector;
+SQL
+```
+
+> Install pgvector if needed:
+> ```bash
+> sudo apt install postgresql-16-pgvector   # replace 16 with your PG version
+> ```
+
+### C2. Create and activate a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### C3. Install Python packages
+
+```bash
+pip install -e "packages/workflow-engine[dev]"
+pip install -e "packages/workflow-api[dev]"
+pip install -e "packages/workflow-worker[dev]"
+pip install -e "packages/workflow-cli[dev]"
+```
+
+### C4. Run migrations
+
+Apply the initial schema:
+```bash
+psql postgresql://workflow:devpassword@localhost:5432/workflow_platform \
+  -f infra/database/postgres/migrations/001_initial_schema.sql
+```
+
+Apply the webhooks table:
+```bash
+psql postgresql://workflow:devpassword@localhost:5432/workflow_platform \
+  -f infra/database/postgres/migrations/002_webhooks.sql
+```
+
+Run Alembic for any subsequent migrations:
+```bash
+cd packages/workflow-api && alembic upgrade head && cd ../..
+```
+
+Bootstrap MongoDB indexes:
+```bash
+python -m workflow_engine.infra.mongodb_indexes
+```
+
+### C5. Start the API server
+
+```bash
+uvicorn workflow_api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### C6. Start the Celery worker (new terminal)
+
+```bash
+source .venv/bin/activate
+celery -A workflow_worker.celery_app worker \
+  --loglevel=info \
+  --queues=default,ai-heavy,critical,scheduled \
+  --concurrency=4
+```
+
+### C7. Start Celery beat — for scheduled triggers (new terminal)
+
+```bash
+source .venv/bin/activate
+celery -A workflow_worker.celery_app beat \
+  --loglevel=info \
+  --scheduler celery.beat:PersistentScheduler
+```
+
+### C8. Verify
+
+```bash
+curl http://localhost:8000/health
+# {"status":"healthy","version":"1.0.0","checks":{"postgres":"ok","mongodb":"ok","redis":"ok"}}
+```
+
+---
+
+## First API calls (all paths)
+
+### Register an account
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@example.com",
     "password": "password123",
     "name": "Admin User",
     "tenant_name": "My Company"
-  }' | python -m json.tool
+  }' | python3 -m json.tool
 ```
 
-Response includes `access_token` and `refresh_token`.
+Copy the `access_token` from the response.
 
-### Create a workflow
+### Create and trigger a workflow
 
 ```bash
-export TOKEN="<access_token from above>"
+TOKEN="<paste access_token>"
 
-curl -s -X POST http://localhost:8000/workflows \
+# Create workflow
+curl -s -X POST http://localhost:8000/api/v1/workflows \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "metadata": { "name": "Hello World", "is_active": true },
+    "name": "Hello World",
     "definition": {
       "nodes": {
-        "trigger_1": {
-          "type": "manual_trigger",
-          "config": {},
-          "position": { "x": 0, "y": 0 }
-        },
-        "prompt_1": {
-          "type": "prompt",
-          "config": {
-            "model": "gemini-2.0-flash",
-            "prompt_template": "Say hello to {{ input.name }}",
-            "max_tokens": 100
-          },
+        "trigger_1":  { "type": "ManualTriggerNode", "config": {}, "position": { "x": 0, "y": 0 } },
+        "template_1": {
+          "type": "TemplatingNode",
+          "config": { "template": "Hello, {{ payload.name }}!" },
           "position": { "x": 300, "y": 0 }
         },
-        "output_1": {
-          "type": "output",
-          "config": { "output_key": "greeting" },
-          "position": { "x": 600, "y": 0 }
-        }
+        "output_1": { "type": "OutputNode", "config": {}, "position": { "x": 600, "y": 0 } }
       },
       "edges": [
-        {
-          "id": "edge_trigger_prompt",
-          "source_node_id": "trigger_1",
-          "source_port": "output",
-          "target_node_id": "prompt_1",
-          "target_port": "input"
-        },
-        {
-          "id": "edge_prompt_output",
-          "source_node_id": "prompt_1",
-          "source_port": "output",
-          "target_node_id": "output_1",
-          "target_port": "input"
-        }
+        { "id": "e1", "source_node_id": "trigger_1",  "source_port": "default", "target_node_id": "template_1", "target_port": "default" },
+        { "id": "e2", "source_node_id": "template_1", "source_port": "default", "target_node_id": "output_1",   "target_port": "default" }
       ]
     }
-  }' | python -m json.tool
-```
+  }' | python3 -m json.tool
+# Note the workflow_id
 
-Note the returned `workflow_id`.
+WORKFLOW_ID="<paste workflow_id>"
 
-### Trigger the workflow
-
-```bash
-export WORKFLOW_ID="<workflow_id from above>"
-
-curl -s -X POST http://localhost:8000/workflows/$WORKFLOW_ID/trigger \
+# Trigger
+curl -s -X POST "http://localhost:8000/api/v1/workflows/$WORKFLOW_ID/trigger" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "input": { "name": "World" } }' | python -m json.tool
+  -d '{ "input_data": { "name": "World" } }' | python3 -m json.tool
+# Note the run_id
+# ManualTriggerNode wraps input_data as {"payload": {...}},
+# so {{ payload.name }} in the template resolves to "World".
+
+RUN_ID="<paste run_id>"
+
+# Poll for result (usually done within 5s)
+curl -s "http://localhost:8000/api/v1/executions/$RUN_ID" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+# "status": "SUCCESS"
+# output_data: {"value": {"rendered": "Hello, World!"}}
 ```
 
-Note the returned `run_id`.
-
-### Check execution result
+### Chat-driven workflow creation
 
 ```bash
-export RUN_ID="<run_id from above>"
+# Create a session
+curl -s -X POST http://localhost:8000/api/v1/chat/sessions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Lead scoring"}' | python3 -m json.tool
+# Note the session_id
 
-curl -s http://localhost:8000/executions/$RUN_ID \
-  -H "Authorization: Bearer $TOKEN" | python -m json.tool
-# "status": "SUCCESS", "output": { "greeting": "Hello, World!" }
-```
+SESSION_ID="<paste session_id>"
 
----
+# Send a message
+curl -s -X POST "http://localhost:8000/api/v1/chat/sessions/$SESSION_ID/message" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "I need a workflow that scores leads from a CRM webhook"}' \
+  | python3 -m json.tool
+# Keep sending messages until phase = COMPLETE
 
-## 12. Start the frontend (optional)
-
-```bash
-# Install dependencies
-cd packages/workflow-ui
-npm install
-
-# Point at the local API
-echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
-
-# Start dev server
-npm run dev
-```
-
-Open **http://localhost:3000** — login with the account from Step 11.
-
-> **Note:** The frontend is not yet built (F-1 through F-6 are pending in
-> TASKS.md). This step is a placeholder for when development begins.
-
----
-
-## 13. Monitor and debug
-
-| URL | What you see |
-|---|---|
-| http://localhost:8000/docs | Swagger UI — try every API endpoint live |
-| http://localhost:8000/redoc | ReDoc — clean API reference |
-| http://localhost:5555 | Flower — Celery task monitor (`admin` / `devpassword`) |
-| http://localhost:8081 | Mongo Express — browse MongoDB collections (`admin` / `devpassword`) |
-
-### Tail API logs
-
-```bash
-# API server logs are already in your terminal.
-# For structured JSON logs, set LOG_LEVEL=DEBUG in .env and restart.
-```
-
-### Tail worker logs
-
-```bash
-# Celery worker logs are in the terminal where you ran make run-worker.
-# For task detail: open Flower at http://localhost:5555
-```
-
-### Run the test suite
-
-```bash
-# Unit tests only (no Docker required)
-make test-unit
-
-# All tests (Docker must be running)
-make test
-
-# Coverage report → opens ./coverage_html/index.html
-make test-cov
+# Real-time streaming via WebSocket (requires wscat: npm install -g wscat)
+wscat -c "ws://localhost:8000/api/v1/chat/sessions/ws/chat/$SESSION_ID?token=$TOKEN"
+# Then type: {"type":"message","content":"score leads from Salesforce webhook"}
 ```
 
 ---
 
-## 14. CLI quickstart
+## CLI
 
 ```bash
-# Install (already done by make install-dev)
+source .venv/bin/activate   # if using venv
+
 wf --help
-
-# Login
 wf auth login --url http://localhost:8000
-
-# List workflows
 wf workflow list
-
-# Trigger a workflow
 wf run trigger <workflow_id> --input '{"name": "World"}'
-
-# Stream logs from a run
 wf run logs <run_id> --follow
 ```
 
 ---
 
-## 15. Known limitations (as of 2026-03-31)
+## Tests
 
-These are tracked in `TASKS.md` — all pending fixes are FIX-12 through FIX-20.
+```bash
+source .venv/bin/activate
 
-| Limitation | Impact | Fix |
-|---|---|---|
-| `auth_service` not wired in `main.py` | All protected routes 500 without Step 6 patch | FIX-13 |
-| `fire_schedule` task is a stub | Scheduled triggers never fire automatically | FIX-16 |
-| `send_notification` task is a stub | Webhook/email notifications not dispatched | FIX-17 |
-| No frontend built yet | UI not available | F-1 through F-6 |
-| gVisor (Tier 2/3 sandbox) requires Linux + gVisor installed | `code_execution` nodes at Tier 2+ fail on Mac/Windows | FIX-6 (tracked) — set `SANDBOX_TIER2_ENABLED=false` in `.env` to fall back to Tier 1 |
-| MFA, HUMAN_WAITING nodes are feature-flagged off | `MCP_NODE_ENABLED=false`, `HUMAN_NODE_ENABLED=false` in `.env` | Set to `true` when ready |
+# Unit tests — no services needed
+pytest packages/workflow-engine/tests/unit -v
+
+# API tests — needs running services
+pytest packages/workflow-api/tests -v
+
+# All tests with coverage
+pytest packages/workflow-engine/tests \
+  --cov=packages/workflow-engine/src/workflow_engine \
+  --cov-report=html:coverage_html \
+  --cov-report=term-missing \
+  --cov-fail-under=85
+# Open coverage_html/index.html for the report
+```
+
+Make equivalents: `make test-unit` / `make test-api` / `make test-cov`
 
 ---
 
-## 16. Stop everything
+## Code quality
 
 ```bash
-# Stop infrastructure (data volumes preserved)
-make dev-down
-
-# Stop infrastructure AND wipe all data
-docker compose -f docker-compose.dev.yml down -v
+ruff check packages/                             # lint
+ruff format packages/ && ruff check --fix packages/  # format
+mypy packages/workflow-engine/src/workflow_engine --strict  # type check
+cd packages/workflow-engine && lint-imports      # layer boundary check
 ```
+
+Make equivalent: `make check`
+
+---
+
+## Frontend (when F-1 is built)
+
+```bash
+cd packages/workflow-ui
+npm install
+echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
+echo "NEXT_PUBLIC_WS_URL=ws://localhost:8000" >> .env.local
+npm run dev
+# Open http://localhost:3000
+```
+
+Make equivalent: `make run-ui`
+
+> Frontend tasks F-1 through F-6 are pending — see TASKS.md.
+
+---
+
+## Debug & monitor
+
+| URL | What |
+|---|---|
+| http://localhost:8000/docs | Swagger UI — try every endpoint live |
+| http://localhost:8000/redoc | ReDoc — clean API reference |
+| http://localhost:5555 | Flower — Celery task monitor (`admin` / `devpassword`) — Docker paths only |
+| http://localhost:8081 | Mongo Express — browse collections (`admin` / `devpassword`) — Docker paths only |
+
+---
+
+## Known limitations (2026-04-01)
+
+| Limitation | Workaround |
+|---|---|
+| `fire_schedule` Celery task is a stub | Scheduled triggers do not fire automatically yet |
+| `send_notification` task is a stub | Outbound webhook / email delivery not dispatched from worker |
+| Frontend (F-1 – F-6) not built yet | Use `/docs` Swagger UI or the CLI |
+| gVisor (Tier 2 sandbox) requires Linux + gVisor installed | Set `SANDBOX_TIER2_ENABLED=false` in `.env` to use Tier 1 (subprocess) |
+| MFA and HumanInput nodes are off by default | Set `MCP_NODE_ENABLED=true` / `HUMAN_NODE_ENABLED=true` in `.env` |
+
+---
+
+## Make command reference
+
+For those using Make — full equivalents for every command above:
+
+| Make command | Direct equivalent |
+|---|---|
+| `make keys` | `mkdir -p keys && openssl genrsa -out keys/private.pem 2048 && openssl rsa -in keys/private.pem -pubout -out keys/public.pem` |
+| `make dev` | `docker compose -f docker-compose.dev.yml up -d` |
+| `make dev-down` | `docker compose -f docker-compose.dev.yml down` |
+| `make install-dev` | `pip install -e "packages/workflow-engine[dev]" && pip install -e "packages/workflow-api[dev]" && pip install -e "packages/workflow-worker[dev]" && pip install -e "packages/workflow-cli[dev]"` |
+| `make migrate` | `cd packages/workflow-api && alembic upgrade head && cd ../.. && python -m workflow_engine.infra.mongodb_indexes` |
+| `make run-api` | `uvicorn workflow_api.main:app --reload --host 0.0.0.0 --port 8000` |
+| `make run-worker` | `celery -A workflow_worker.celery_app worker --loglevel=info --queues=default,ai-heavy,critical,scheduled --concurrency=4` |
+| `make run-scheduler` | `celery -A workflow_worker.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler` |
+| `make run-ui` | `cd packages/workflow-ui && npm run dev` |
+| `make test-unit` | `pytest packages/workflow-engine/tests/unit -v` |
+| `make test-api` | `pytest packages/workflow-api/tests -v` |
+| `make test-cov` | `pytest packages/workflow-engine/tests --cov=... --cov-fail-under=85` |
+| `make lint` | `ruff check packages/` |
+| `make format` | `ruff format packages/ && ruff check --fix packages/` |
+| `make typecheck` | `mypy packages/workflow-engine/src/workflow_engine --strict` |
+| `make check` | `make lint && make typecheck && make layer-check` |
 
 ---
 
@@ -459,19 +620,20 @@ docker compose -f docker-compose.dev.yml down -v
 ```
 dk-platform/
 ├── packages/
-│   ├── workflow-engine/   ← SDK — all business logic (Layers A–D + Phase 7 Chat)
+│   ├── workflow-engine/   ← SDK — all business logic
 │   ├── workflow-api/      ← FastAPI delivery layer (HTTP + WebSocket)
-│   ├── workflow-worker/   ← Celery delivery layer (async task execution)
-│   ├── workflow-cli/      ← CLI delivery layer (wf command)
-│   └── workflow-ui/       ← Next.js 14 frontend (not yet built)
+│   ├── workflow-worker/   ← Celery delivery layer
+│   ├── workflow-cli/      ← CLI (wf command)
+│   └── workflow-ui/       ← Next.js 14 frontend (pending F-1 – F-6)
 ├── docs/
-│   ├── api/openapi.yaml          ← Full API spec (54 paths)
-│   ├── frontend/app-handover.md  ← Frontend team handover (all modules)
-│   ├── frontend/chat-module.md   ← Chat + DAG builder UI spec
-│   └── frontend/handover.md      ← Schema corrections reference
-├── infra/                 ← SQL migrations, MongoDB init, K8s manifests
+│   ├── api/openapi.yaml          ← Full API spec (all paths + schemas)
+│   ├── frontend/handover.md      ← Schema corrections + WebSocket protocol
+│   ├── frontend/chat-module.md   ← Chat UI TypeScript spec
+│   └── frontend/overview.md      ← Tech stack, canvas state, auth flow
+├── infra/
+│   └── database/postgres/migrations/  ← Raw SQL (001 initial, 002 webhooks)
 ├── keys/                  ← JWT key pair (git-ignored)
-├── docker-compose.dev.yml ← Local infrastructure
-├── Makefile               ← All developer commands
-└── .env.example           ← Environment variable reference
+├── .env.example           ← All environment variable reference
+├── docker-compose.dev.yml ← Docker infrastructure stack
+└── Makefile               ← Shorthand for all commands above
 ```

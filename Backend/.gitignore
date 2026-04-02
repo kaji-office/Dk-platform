@@ -1,0 +1,200 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DK Platform — .gitignore
+# Stack: Python (FastAPI, Celery, Hatch), Next.js 14, Docker, Helm, Postgres, MongoDB, Redis
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets & Environment ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+keys/
+secrets/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.pyo
+MANIFEST
+
+# ── Virtual Environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+.python-version
+
+# ── Hatch / Build ─────────────────────────────────────────────────────────────
+.hatch/
+*.dist-info/
+__pypackages__/
+
+# ── Testing & Coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+coverage/
+htmlcov/
+*.coveragerc
+nosetests.xml
+test-results/
+test-reports/
+junit.xml
+.hypothesis/
+
+# ── Linting & Type Checking ───────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+.pyre/
+
+# ── Celery ────────────────────────────────────────────────────────────────────
+celerybeat-schedule
+celerybeat-schedule.db
+celerybeat.pid
+*.pid
+
+# ── Alembic ───────────────────────────────────────────────────────────────────
+# Keep versions/ committed; ignore generated temp files
+alembic/versions/__pycache__/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+*.log.*
+logs/
+worker_*.log
+gunicorn-*.log
+
+# ── IDEs & Editors ────────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.project
+.classpath
+.settings/
+nbproject/
+*.sublime-project
+*.sublime-workspace
+
+# ── Claude / AI Agent ────────────────────────────────────────────────────────
+.claude/
+
+# ── Node.js / Next.js (Phase 6 Frontend) ────────────────────────────────────
+node_modules/
+.next/
+.nuxt/
+out/
+dist/
+build/
+.turbo/
+.cache/
+.parcel-cache/
+*.tsbuildinfo
+next-env.d.ts
+
+# npm / yarn / pnpm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+.yarn/
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Keep Dockerfiles committed; ignore local build artifacts
+.docker/
+docker-compose.override.yml
+
+# ── Kubernetes / Helm ─────────────────────────────────────────────────────────
+# Keep manifests committed; ignore generated lock files and rendered outputs
+infra/helm/*/charts/*.tgz
+infra/helm/*/Chart.lock
+rendered/
+*.rendered.yaml
+
+# ── Databases (local dev) ─────────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+pgdata/
+mongodata/
+redisdata/
+
+# ── Temporary / Scratch Files ─────────────────────────────────────────────────
+tmp/
+temp/
+scratch/
+*.tmp
+*.bak
+*.swp
+*.orig
+fix_openapi.py
+update_tasks.py
+update_tasks_fix.py
+
+# ── OS Generated ──────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Pre-commit ────────────────────────────────────────────────────────────────
+# Keep .pre-commit-config.yaml committed
+.pre-commit-hooks.yaml
+
+# ── Observability / Telemetry (local) ────────────────────────────────────────
+jaeger-data/
+prometheus-data/
+grafana-data/
+
+# ── Miscellaneous ─────────────────────────────────────────────────────────────
+*.pyc
+.cached/
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

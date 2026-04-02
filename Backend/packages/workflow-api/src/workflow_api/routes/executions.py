@@ -32,6 +32,11 @@ async def trigger_execution(
     """Enqueue a workflow execution. Returns run_id immediately (async)."""
     svc = request.app.state.execution_service
     run = await svc.trigger(tenant_id, workflow_id, body.input_data, triggered_by=user["id"])
+    await request.app.state.audit_service.write(
+        tenant_id=tenant_id, event_type="execution.triggered", user_id=user["id"],
+        resource_type="execution", resource_id=run["run_id"],
+        detail={"workflow_id": workflow_id},
+    )
     return {"run_id": run["run_id"], "status": "queued"}
 
 
@@ -71,7 +76,10 @@ async def cancel_execution(
     _: dict = RequireWrite,
 ) -> dict:
     svc = request.app.state.execution_service
-    return await svc.cancel(tenant_id, run_id)
+    try:
+        return await svc.cancel(tenant_id, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.post("/executions/{run_id}/retry")
@@ -83,7 +91,10 @@ async def retry_execution(
     _: dict = RequireWrite,
 ) -> dict:
     svc = request.app.state.execution_service
-    return await svc.retry(tenant_id, run_id)
+    try:
+        return await svc.retry(tenant_id, run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 # ── Nodes ─────────────────────────────────────────────────────────────────────
@@ -99,7 +110,10 @@ async def list_nodes(run_id: str, user: CurrentUser, tenant_id: TenantId, reques
 async def submit_human_input(body: HumanInputRequest, user: CurrentUser, tenant_id: TenantId, request: Request) -> dict:
     """Submit a human approval/response for a paused execution node."""
     svc = request.app.state.execution_service
-    return await svc.submit_human_input(tenant_id, body.run_id, body.node_id, body.response)
+    try:
+        return await svc.submit_human_input(tenant_id, body.run_id, body.node_id, body.response)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 # ── Logs ──────────────────────────────────────────────────────────────────────

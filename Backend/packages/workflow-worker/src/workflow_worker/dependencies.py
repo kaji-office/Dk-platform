@@ -7,7 +7,6 @@ import asyncio
 from workflow_engine.models.tenant import TenantConfig
 from workflow_engine.execution.orchestrator import RunOrchestrator
 from workflow_engine.nodes import NodeServices
-from workflow_engine.storage.s3_storage import S3StorageService
 
 # Store singletons per worker process
 _sdk: dict[str, Any] | None = None
@@ -28,26 +27,29 @@ async def get_engine() -> dict[str, Any]:
     from workflow_engine.config import StorageConfig, LLMProvidersConfig
     from workflow_engine.storage.factory import RepositoryFactory
     from workflow_engine.providers.factory import ProviderFactory
+    from workflow_engine.cache.redis_cache import RedisCache
+    import redis.asyncio as aioredis
 
-    # Use StorageConfig directly — RepositoryFactory accesses config.mongodb_url /
-    # .postgres_url which live on StorageConfig, not the nested EngineConfig.
-    # EngineConfig.tenant also requires TENANT_ID (a per-request value), which
-    # must not be a global startup requirement.
     storage_config = StorageConfig()
     llm_config = LLMProvidersConfig()
     repos = await RepositoryFactory.create_all(storage_config)
     llm_port = ProviderFactory.from_config(llm_config, provider_name="mock")
+
+    # Redis cache — required for SetStateNode state tracking
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_client = await aioredis.from_url(redis_url, decode_responses=True)
+    redis_cache = RedisCache(client=redis_client)
 
     tenant_config = TenantConfig(
         tenant_id="system", max_depth=10, timeout_seconds=3000,
         features={"caching": True}, memory_limit_mb=1024,
         allow_external_http=True
     )
-    
+
     services = NodeServices(
         storage=repos.storage,
         http_client=None,
-        cache=None,
+        cache=redis_cache,
         llm=llm_port
     )
     

@@ -18,27 +18,45 @@ TRANSIENT_ERRORS = (ConnectionErrorRetryable, TimeoutError, ConnectionRefusedErr
     retry_backoff=True,
     name="workflow_worker.tasks.execute_workflow"
 )
-def execute_workflow(self, run_id: str, tenant_id: str):
-    """AC: Calls ExecutionEngine.run() equivalent"""
+def execute_workflow(
+    self,
+    run_id: str,
+    tenant_id: str,
+    workflow_id: str | None = None,
+    input_data: dict | None = None,
+    resume_node: str | None = None,
+    human_response: dict | None = None,
+):
+    """Execute or resume a workflow run via the RunOrchestrator."""
     try:
         sdk = run_async(get_engine())
         run = run_async(sdk["execution_repo"].get(tenant_id, run_id))
         if not run:
             logger.error(f"Run {run_id} not found")
             return False
-            
+
         workflow = run_async(sdk["workflow_repo"].get(tenant_id, run.workflow_id))
         if not workflow:
             logger.error(f"Workflow {run.workflow_id} not found")
             return False
 
-        # Actually execute!
-        run_async(sdk["orchestrator"].run(
-            workflow_def=workflow,
-            run_id=run_id,
-            tenant_id=tenant_id,
-            trigger_input=run.trigger_input
-        ))
+        if resume_node and human_response is not None:
+            # Human-in-the-loop resume path
+            run_async(sdk["orchestrator"].resume(
+                tenant_id=tenant_id,
+                run_id=run_id,
+                node_id=resume_node,
+                workflow_def=workflow,
+                human_response=human_response,
+            ))
+        else:
+            # Normal execution path — use input_data from DB record (authoritative)
+            run_async(sdk["orchestrator"].run(
+                workflow_def=workflow,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                trigger_input=run.input_data,
+            ))
     except WorkflowValidationError as exc:
         logger.error(f"Validation error running execution {run_id}: {exc}")
         self.request.chain = None
@@ -81,9 +99,34 @@ def fire_schedule(self):
     sdk = run_async(get_engine())
     from workflow_engine.scheduler.service import SchedulerService
     service = SchedulerService(sdk["scheduler"])
-    
+
     fired = run_async(service.tick())
     logger.info(f"Checked schedules. Fired {len(fired)} schedules.")
+
+    # Dispatch an execution run for each fired schedule.
+    for schedule in fired:
+        tenant_id = schedule.tenant_id or "system"
+        workflow_id = schedule.workflow_id
+        if not workflow_id:
+            continue
+        try:
+            from workflow_engine.models import ExecutionRun, RunStatus
+            from datetime import datetime, timezone
+            import uuid
+            run_id = f"run_{uuid.uuid4().hex[:16]}"
+            run = ExecutionRun(
+                run_id=run_id,
+                workflow_id=workflow_id,
+                tenant_id=tenant_id,
+                status=RunStatus.QUEUED,
+                input_data=schedule.input_data,
+                started_at=datetime.now(timezone.utc),
+            )
+            run_async(sdk["execution_repo"].create(tenant_id, run))
+            execute_workflow.delay(run_id, tenant_id, workflow_id)
+            logger.info(f"Dispatched run {run_id} for schedule {schedule.schedule_id} (workflow {workflow_id})")
+        except Exception as exc:
+            logger.error(f"Failed to dispatch run for schedule {schedule.schedule_id}: {exc}")
 
 @app.task(
     bind=True,

@@ -18,8 +18,11 @@ app = Celery(
 
 # Queues and Routing
 app.conf.task_queues = (
-    Queue("default", Exchange("default"), routing_key="default"),
-    Queue("DLQ", Exchange("DLQ"), routing_key="dead_letter"),
+    Queue("default",   Exchange("default"),   routing_key="default"),
+    Queue("ai-heavy",  Exchange("ai-heavy"),  routing_key="ai-heavy"),
+    Queue("critical",  Exchange("critical"),  routing_key="critical"),
+    Queue("scheduled", Exchange("scheduled"), routing_key="scheduled"),
+    Queue("DLQ",       Exchange("DLQ"),       routing_key="dead_letter"),
 )
 app.conf.task_default_queue = "default"
 app.conf.task_default_exchange = "default"

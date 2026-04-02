@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -51,7 +51,20 @@ class ChatOrchestrator:
         self.clarifier = clarifier
         self.generator = generator
 
-    async def process_message(self, session_id: str, tenant_id: str, user_message: str) -> ChatResponse:
+    async def process_message(
+        self,
+        session_id: str,
+        tenant_id: str,
+        user_message: str,
+        publish: Callable[[str, dict], Awaitable[None]] | None = None,
+    ) -> ChatResponse:
+        async def _emit(event: dict) -> None:
+            if publish:
+                try:
+                    await publish(session_id, event)
+                except Exception as exc:
+                    logger.debug(f"chat publish error: {exc}")
+
         session = await self.repo.get_session(session_id, tenant_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
@@ -61,6 +74,8 @@ class ChatOrchestrator:
         req_msg = ChatMessage(id=msg_id_req, role="user", content=user_message, ts=datetime.now(timezone.utc))
         await self.repo.append_message(session_id, req_msg)
         session.messages.append(req_msg)
+
+        await _emit({"type": "status", "phase": "PROCESSING"})
 
         if session.phase == ConversationPhase.COMPLETE:
             # Already complete, reply generic message. 
@@ -83,7 +98,8 @@ class ChatOrchestrator:
         if questions:
             await self.repo.update_phase(session_id, ConversationPhase.CLARIFYING)
             session.phase = ConversationPhase.CLARIFYING
-            
+            await _emit({"type": "phase", "phase": "CLARIFYING"})
+
             clarification_msg = "\n".join(f"- {q}" for q in questions)
             
             # Save Assistant Reply
@@ -99,6 +115,7 @@ class ChatOrchestrator:
         # 4. Phase -> FINALIZING/GENERATING
         await self.repo.update_phase(session_id, ConversationPhase.GENERATING)
         session.phase = ConversationPhase.GENERATING
+        await _emit({"type": "phase", "phase": "GENERATING"})
 
         # 5. Generate DAG
         try:
@@ -140,7 +157,13 @@ class ChatOrchestrator:
         
         assistant_msg = ChatMessage(id=f"msg_{uuid.uuid4().hex}", role="assistant", content=f"Your workflow '{saved_wf.name}' has been successfully generated!", ts=datetime.now(timezone.utc))
         await self.repo.append_message(session_id, assistant_msg)
-        
+        await _emit({
+            "type": "response",
+            "phase": "COMPLETE",
+            "message": assistant_msg.content,
+            "workflow_id": saved_wf.id,
+        })
+
         return self._build_response(
             session,
             assistant_msg.content,

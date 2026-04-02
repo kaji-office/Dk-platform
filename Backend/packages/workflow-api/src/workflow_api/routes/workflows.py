@@ -43,7 +43,13 @@ async def create_workflow(
     _: dict = RequireWrite,
 ) -> dict:
     svc = request.app.state.workflow_service
-    return await svc.create(tenant_id, body.model_dump())
+    result = await svc.create(tenant_id, body.model_dump())
+    await request.app.state.audit_service.write(
+        tenant_id=tenant_id, event_type="workflow.created", user_id=user["id"],
+        resource_type="workflow", resource_id=result.get("workflow_id"),
+        detail={"name": body.name},
+    )
+    return result
 
 
 @router.get("/{workflow_id}")
@@ -79,6 +85,10 @@ async def delete_workflow(
 ):
     svc = request.app.state.workflow_service
     await svc.delete(tenant_id, workflow_id)
+    await request.app.state.audit_service.write(
+        tenant_id=tenant_id, event_type="workflow.deleted", user_id=user["id"],
+        resource_type="workflow", resource_id=workflow_id,
+    )
 
 
 @router.post("/{workflow_id}/activate")
@@ -152,4 +162,10 @@ async def create_schedule(
     _: dict = RequireWrite,
 ) -> dict:
     svc = request.app.state.schedule_service
-    return await svc.create(tenant_id, workflow_id, body)
+    result = await svc.create(tenant_id, workflow_id, body)
+    await request.app.state.audit_service.write(
+        tenant_id=tenant_id, event_type="schedule.created", user_id=user["id"],
+        resource_type="schedule", resource_id=result.get("schedule_id"),
+        detail={"workflow_id": workflow_id, "cron_expression": body.get("cron_expression")},
+    )
+    return result

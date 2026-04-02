@@ -34,13 +34,74 @@ logger = logging.getLogger(__name__)
 # Routes call high-level methods; facades delegate to the correct SDK service.
 # ─────────────────────────────────────────────────────────────────────────────
 
+class EmailService:
+    """
+    Async email sender backed by stdlib smtplib (run_in_executor).
+    Requires SMTP_HOST env var to be enabled; gracefully no-ops when not set.
+    """
+
+    def __init__(
+        self,
+        smtp_host: str | None,
+        smtp_port: int = 587,
+        smtp_user: str | None = None,
+        smtp_password: str | None = None,
+        from_email: str = "noreply@dkplatform.io",
+    ) -> None:
+        self._host = smtp_host
+        self._port = smtp_port
+        self._user = smtp_user
+        self._password = smtp_password
+        self._from = from_email
+        self._enabled = bool(smtp_host)
+
+    async def send(self, to: str, subject: str, body_html: str) -> bool:
+        if not self._enabled:
+            logger.info("EmailService disabled — skipping send to=%s subject=%r", to, subject)
+            return False
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        def _send() -> None:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = self._from
+            msg["To"] = to
+            msg.attach(MIMEText(body_html, "html"))
+            with smtplib.SMTP(self._host, self._port) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                if self._user:
+                    smtp.login(self._user, self._password or "")
+                smtp.sendmail(self._from, to, msg.as_string())
+
+        import asyncio as _asyncio
+        try:
+            await _asyncio.get_running_loop().run_in_executor(None, _send)
+            logger.info("Email sent to=%s subject=%r", to, subject)
+            return True
+        except Exception as exc:
+            logger.error("EmailService.send() failed: %s", exc)
+            return False
+
+
 class PlatformAuthService:
     """Coordinates JWTService + PasswordService + UserRepository for /auth routes."""
 
-    def __init__(self, jwt_svc: Any, pwd_svc: Any, user_repo: Any) -> None:
+    def __init__(
+        self,
+        jwt_svc: Any,
+        pwd_svc: Any,
+        user_repo: Any,
+        email_svc: EmailService | None = None,
+        app_url: str = "http://localhost:3000",
+    ) -> None:
         self._jwt = jwt_svc
         self._pwd = pwd_svc
         self._users = user_repo
+        self._email = email_svc
+        self._app_url = app_url
 
     async def verify_token(self, token: str) -> dict[str, Any]:
         """Called by dependencies.py on every authenticated request."""
@@ -102,6 +163,25 @@ class PlatformAuthService:
             "VALUES ($1, $2, $3, 'OWNER', $4, false, NOW())",
             user_id, email.lower(), hashed, tenant_id,
         )
+
+        # Issue verification token and send email (non-blocking — failure doesn't abort registration)
+        import secrets as _sec
+        ver_token = _sec.token_urlsafe(32)
+        await self._users._pool.execute(
+            "UPDATE users SET verification_token = $1, verification_expires_at = NOW() + INTERVAL '24 hours' "
+            "WHERE id = $2",
+            ver_token, user_id,
+        )
+        if self._email:
+            verify_url = f"{self._app_url}/verify-email?token={ver_token}"
+            await self._email.send(
+                email,
+                "Verify your DK Platform account",
+                f"<p>Welcome! Click the link below to verify your email address:</p>"
+                f"<p><a href='{verify_url}'>Verify Email</a></p>"
+                f"<p>This link expires in 24 hours.</p>",
+            )
+
         return {"id": user_id, "email": email}
 
     async def login(self, email: str, password: str) -> dict:
@@ -138,13 +218,62 @@ class PlatformAuthService:
         return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer", "expires_in": 900}
 
     async def verify_email(self, token: str) -> None:
-        pass  # v1: feature-flagged off — requires email/SMTP integration
+        row = await self._users._pool.fetchrow(
+            "SELECT id FROM users WHERE verification_token = $1 AND verification_expires_at > NOW()",
+            token,
+        )
+        if not row:
+            raise ValueError("Invalid or expired verification token")
+        await self._users._pool.execute(
+            "UPDATE users SET is_verified = true, verification_token = NULL, verification_expires_at = NULL "
+            "WHERE id = $1",
+            row["id"],
+        )
 
     async def send_password_reset(self, email: str) -> None:
-        pass  # v1: requires SMTP/SES — stub logs and returns silently
+        row = await self._users._pool.fetchrow(
+            "SELECT id FROM users WHERE email = $1", email.lower()
+        )
+        if not row:
+            return  # Don't reveal whether the email exists
+        import secrets as _sec, hashlib as _hl
+        token = _sec.token_urlsafe(32)
+        token_hash = _hl.sha256(token.encode()).hexdigest()
+        await self._users._pool.execute(
+            "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) "
+            "VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')",
+            str(uuid.uuid4()), row["id"], token_hash,
+        )
+        if self._email:
+            reset_url = f"{self._app_url}/reset-password?token={token}"
+            await self._email.send(
+                email,
+                "Reset your DK Platform password",
+                f"<p>Click the link below to reset your password (expires in 1 hour):</p>"
+                f"<p><a href='{reset_url}'>Reset Password</a></p>"
+                f"<p>If you did not request this, you can safely ignore this email.</p>",
+            )
 
     async def reset_password(self, token: str, new_password: str) -> None:
-        pass  # v1: requires password_reset_tokens table flow
+        import hashlib as _hl
+        token_hash = _hl.sha256(token.encode()).hexdigest()
+        row = await self._users._pool.fetchrow(
+            "SELECT id, user_id FROM password_reset_tokens "
+            "WHERE token_hash = $1 AND expires_at > NOW() AND used_at IS NULL",
+            token_hash,
+        )
+        if not row:
+            raise ValueError("Invalid or expired reset token")
+        strength = self._pwd.validate_strength(new_password)
+        if not strength.is_valid:
+            raise ValueError(", ".join(strength.errors))
+        new_hash = self._pwd.hash(new_password)
+        await self._users._pool.execute(
+            "UPDATE users SET password_hash = $1 WHERE id = $2", new_hash, row["user_id"]
+        )
+        await self._users._pool.execute(
+            "UPDATE password_reset_tokens SET used_at = NOW() WHERE id = $1", row["id"]
+        )
 
     async def mfa_setup(self, user_id: str) -> dict:
         return {"enabled": False, "message": "MFA feature-flagged off in v1"}
@@ -248,12 +377,28 @@ class PlatformWorkflowService:
         # Accept either a list (UI sends []) or dict — normalize to empty dict if list
         if isinstance(raw_nodes, list):
             raw_nodes = {}
+        # Auto-inject the dict key as node id so callers don't have to duplicate it
+        for node_key, node_val in raw_nodes.items():
+            if isinstance(node_val, dict):
+                node_val.setdefault("id", node_key)
+        # Normalise edge field aliases: source_node_id → source_node, target_node_id → target_node
+        # Also auto-generate edge id if missing
+        raw_edges = []
+        for e in (raw_def.get("edges") or []):
+            if isinstance(e, dict):
+                e = dict(e)
+                if "source_node_id" in e and "source_node" not in e:
+                    e["source_node"] = e.pop("source_node_id")
+                if "target_node_id" in e and "target_node" not in e:
+                    e["target_node"] = e.pop("target_node_id")
+                e.setdefault("id", f"edge_{uuid.uuid4().hex[:8]}")
+            raw_edges.append(e)
         wf = WorkflowDefinition(
             id=str(uuid.uuid4()),
             name=data.get("name", "Untitled"),
             description=data.get("description"),
             nodes=raw_nodes,
-            edges=raw_def.get("edges") or [],
+            edges=raw_edges,
         )
         created = await self._repo.create(tenant_id, wf)
         return created.model_dump(mode="json")
@@ -307,7 +452,7 @@ class PlatformExecutionService:
             workflow_id=workflow_id,
             status="QUEUED",
             input_data=input_data,
-            started_at=datetime.now(tz=timezone.utc),
+            started_at=datetime.now(tz=timezone.utc),  # matches MongoDB validator field name
             node_states={},
         )
         await self._executions.create(tenant_id, run)
@@ -316,6 +461,8 @@ class PlatformExecutionService:
             execute_workflow.delay(run_id, tenant_id, workflow_id, input_data)
         except ImportError:
             logger.warning("workflow_worker not available — run queued in DB but not dispatched")
+        except Exception as exc:
+            logger.warning("workflow dispatch failed (%s) — run queued in DB: %s", type(exc).__name__, exc)
         return {"run_id": run_id, "status": "QUEUED"}
 
     async def list(
@@ -394,12 +541,17 @@ class PlatformScheduleService:
 
     async def create(self, tenant_id: str, workflow_id: str, data: dict) -> dict:
         from workflow_engine.models import ScheduleModel
+        from workflow_engine.scheduler.cron_utils import CronUtils
+        cron_expression = data.get("cron_expression", "0 * * * *")
+        timezone = data.get("timezone", "UTC")
         schedule = ScheduleModel(
             schedule_id=str(uuid.uuid4()),
             workflow_id=workflow_id,
-            cron_expression=data.get("cron_expression", "0 * * * *"),
-            timezone=data.get("timezone", "UTC"),
+            cron_expression=cron_expression,
+            timezone=timezone,
             is_active=True,
+            next_fire_at=CronUtils.compute_next_fire(cron_expression, timezone),
+            input_data=data.get("input_data", {}),
         )
         result = await self._repo.create(tenant_id, schedule)
         return result.model_dump(mode="json")
@@ -437,27 +589,145 @@ class PlatformAuditService:
             docs.append(doc)
         return docs
 
+    async def write(
+        self,
+        tenant_id: str,
+        event_type: str,
+        user_id: str | None,
+        resource_type: str,
+        resource_id: str | None,
+        detail: dict | None = None,
+    ) -> None:
+        from datetime import datetime, timezone
+        await self._col.insert_one({
+            "tenant_id": tenant_id,
+            "event_type": event_type,
+            "user_id": user_id,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+            "detail": detail or {},
+            "created_at": datetime.now(timezone.utc),
+        })
+
 
 class PlatformWebhookService:
-    """Stub — no webhook table in the DB schema yet. Returns safe empty responses."""
+    """PostgreSQL-backed webhook service using the shared asyncpg pool."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    @staticmethod
+    def _row(record: Any) -> dict:
+        """Convert asyncpg Record → plain dict with UUID fields as strings."""
+        import uuid as _uuid
+        return {k: str(v) if isinstance(v, _uuid.UUID) else v for k, v in dict(record).items()}
 
     async def list(self, tenant_id: str) -> list:
-        return []
+        rows = await self._pool.fetch(
+            "SELECT id, tenant_id, workflow_id, name, events, endpoint_url, active, created_at, updated_at "
+            "FROM webhooks WHERE tenant_id = $1 AND active = true ORDER BY created_at DESC",
+            tenant_id,
+        )
+        return [self._row(r) for r in rows]
 
     async def create(self, tenant_id: str, data: dict) -> dict:
-        return {**data, "webhook_id": str(uuid.uuid4()), "tenant_id": tenant_id, "active": True}
+        import secrets as _sec
+        hook_id = str(uuid.uuid4())
+        secret = data.get("secret") or _sec.token_urlsafe(32)
+        await self._pool.execute(
+            "INSERT INTO webhooks (id, tenant_id, workflow_id, name, events, webhook_secret, active, created_at, updated_at) "
+            "VALUES ($1, $2, $3, $4, $5::text[], $6, true, NOW(), NOW())",
+            hook_id, tenant_id, data["workflow_id"], data["name"],
+            data.get("events", ["execution.completed"]), secret,
+        )
+        row = await self._pool.fetchrow(
+            "SELECT id, tenant_id, workflow_id, name, events, endpoint_url, active, created_at FROM webhooks WHERE id = $1",
+            hook_id,
+        )
+        result = self._row(row)
+        result["secret"] = secret  # return plaintext secret only at creation time
+        return result
 
     async def get(self, tenant_id: str, webhook_id: str) -> dict | None:
-        return None
+        row = await self._pool.fetchrow(
+            "SELECT id, tenant_id, workflow_id, name, events, endpoint_url, active, created_at, updated_at "
+            "FROM webhooks WHERE id = $1 AND tenant_id = $2",
+            webhook_id, tenant_id,
+        )
+        return self._row(row) if row else None
 
     async def update(self, tenant_id: str, webhook_id: str, data: dict) -> dict:
-        return {**data, "webhook_id": webhook_id}
+        allowed = {"name": "name", "active": "active", "events": "events::text[]", "endpoint_url": "endpoint_url"}
+        sets, vals = [], []
+        for field, col in allowed.items():
+            if field in data:
+                sets.append(f"{field} = ${len(vals) + 1}{'::text[]' if field == 'events' else ''}")
+                vals.append(data[field])
+        sets.append(f"updated_at = NOW()")
+        vals.extend([webhook_id, tenant_id])
+        if len(sets) > 1:  # at least one real update beside updated_at
+            await self._pool.execute(
+                f"UPDATE webhooks SET {', '.join(sets)} WHERE id = ${len(vals) - 1} AND tenant_id = ${len(vals)}",
+                *vals,
+            )
+        row = await self._pool.fetchrow(
+            "SELECT id, tenant_id, workflow_id, name, events, endpoint_url, active, created_at, updated_at "
+            "FROM webhooks WHERE id = $1",
+            webhook_id,
+        )
+        return self._row(row) if row else {}
 
     async def delete(self, tenant_id: str, webhook_id: str) -> None:
-        pass
+        await self._pool.execute(
+            "UPDATE webhooks SET active = false, updated_at = NOW() WHERE id = $1 AND tenant_id = $2",
+            webhook_id, tenant_id,
+        )
 
     async def handle_inbound(self, workflow_id: str, body: dict, signature: str) -> dict:
-        return {"accepted": True, "workflow_id": workflow_id}
+        import hashlib as _hl
+        import hmac as _hmac
+        import json as _json
+
+        rows = await self._pool.fetch(
+            "SELECT id, tenant_id, webhook_secret FROM webhooks WHERE workflow_id = $1 AND active = true LIMIT 1",
+            workflow_id,
+        )
+        if not rows:
+            return {"accepted": False, "reason": "No active webhook for this workflow"}
+
+        hook = rows[0]
+        tenant_id = str(hook["tenant_id"])
+        webhook_id = str(hook["id"])
+
+        # HMAC-SHA256 verification: if a secret is registered, signature is mandatory
+        if hook["webhook_secret"]:
+            if not signature:
+                return {"accepted": False, "reason": "Missing webhook signature"}
+            body_bytes = _json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+            expected = _hmac.new(hook["webhook_secret"].encode(), body_bytes, _hl.sha256).hexdigest()
+            # Strip "sha256=" prefix if present
+            provided = signature[len("sha256="):] if signature.startswith("sha256=") else signature
+            if not _hmac.compare_digest(expected, provided):
+                return {"accepted": False, "reason": "Invalid webhook signature"}
+
+        run_id = f"run_{uuid.uuid4().hex[:16]}"
+        try:
+            from workflow_worker.tasks import execute_workflow
+            execute_workflow.delay(run_id, tenant_id, workflow_id, body)
+        except ImportError:
+            logger.warning("workflow_worker unavailable — inbound webhook received but not dispatched")
+
+        # Persist delivery record (best-effort)
+        try:
+            await self._pool.execute(
+                "INSERT INTO webhook_deliveries (id, webhook_id, tenant_id, workflow_id, event_type, payload) "
+                "VALUES ($1, $2, $3, $4, 'inbound', $5::jsonb)",
+                str(uuid.uuid4()), webhook_id, tenant_id, workflow_id, _json.dumps(body),
+            )
+        except Exception as exc:
+            logger.warning("webhook_deliveries insert failed: %s", exc)
+
+        return {"accepted": True, "workflow_id": workflow_id, "run_id": run_id}
 
 
 class PlatformBillingService:
@@ -549,18 +819,30 @@ async def lifespan(app: FastAPI):
         generator=dag_svc,
     )
 
-    # 5. Raw Motor DB handle — needed for audit_log (no typed repo in bundle yet)
+    # 5. Email service — enabled only when SMTP_HOST is set
+    email_svc = EmailService(
+        smtp_host=os.getenv("SMTP_HOST"),
+        smtp_port=int(os.getenv("SMTP_PORT", "587")),
+        smtp_user=os.getenv("SMTP_USER"),
+        smtp_password=os.getenv("SMTP_PASSWORD"),
+        from_email=os.getenv("EMAIL_FROM", "noreply@dkplatform.io"),
+    )
+    app_url = os.getenv("APP_URL", "http://localhost:3000")
+
+    # 6. Raw Motor DB handle — needed for audit_log (no typed repo in bundle yet)
     mongo_db = repos.workflows._collection.database
 
-    # 6. Wire all services onto app.state
+    # 7. Wire all services onto app.state
+    app.state.redis_client = redis_client  # exposed for WebSocket PubSub
+
     services: dict[str, Any] = {
-        "auth_service":      PlatformAuthService(jwt_svc, pwd_svc, repos.users),
+        "auth_service":      PlatformAuthService(jwt_svc, pwd_svc, repos.users, email_svc, app_url),
         "user_service":      PlatformUserService(repos.users),
         "workflow_service":  PlatformWorkflowService(repos.workflows),
         "execution_service": PlatformExecutionService(repos.executions, repos.workflows),
         "schedule_service":  PlatformScheduleService(repos.schedules),
         "audit_service":     PlatformAuditService(mongo_db),
-        "webhook_service":   PlatformWebhookService(),
+        "webhook_service":   PlatformWebhookService(repos.users._pool),
         "billing_service":   PlatformBillingService(repos.billing),
         "chat_orchestrator": chat_orch,
         "repos":             repos,

@@ -1,3108 +1,2487 @@
 openapi: 3.1.0
-
 info:
-  title: AI Workflow Builder API
+  title: DK Workflow API
+  description: AI Workflow Builder — REST Gateway
   version: 1.0.0
-  description: |
-    REST API for the AI Workflow Builder platform.
-
-    ## Authentication
-    All endpoints (except `/auth/*` and `/health`) require a valid JWT Bearer token
-    or an API Key in the `X-API-Key` header.
-
-    ## Tenant Isolation
-    Every request is scoped to a tenant. The tenant is resolved from the JWT claim
-    (`tenant_id`) or from the API key row. Cross-tenant access is impossible by design.
-
-    ## Error Envelope
-    All error responses use the standard envelope below:
-    ```json
-    {
-      "error": {
-        "code": "WORKFLOW_NOT_FOUND",
-        "message": "Workflow wf_abc123 not found.",
-        "request_id": "req_01J..."
-      }
-    }
-    ```
-
-  contact:
-    name: Platform Engineering
-  license:
-    name: Proprietary
-
-servers:
-  - url: https://api.workflowplatform.io/v1
-    description: Production (us-east-1)
-  - url: https://api.eu.workflowplatform.io/v1
-    description: EU Production (eu-west-1 — v1.2+)
-  - url: http://localhost:8000/v1
-    description: Local development
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Security Schemes
-# ─────────────────────────────────────────────────────────────────────────────
-
-components:
-  securitySchemes:
-    BearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: RS256-signed JWT. Obtain via `/auth/login` or `/auth/token/refresh`.
-
-    ApiKeyAuth:
-      type: apiKey
-      in: header
-      name: X-API-Key
-      description: |
-        Tenant API key (prefix `wfk_`). Created in the dashboard.
-        Scopes are checked per-endpoint.
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Reusable Schemas
-  # ───────────────────────────────────────────────────────────────────────────
-
-  schemas:
-
-    # ── Error ─────────────────────────────────────────────────────────────────
-    ErrorDetail:
-      type: object
-      required: [code, message, request_id]
-      properties:
-        code:
-          type: string
-          example: WORKFLOW_NOT_FOUND
-        message:
-          type: string
-          example: "Workflow wf_abc123 not found."
-        request_id:
-          type: string
-          example: req_01JRXYZ
-
-    ErrorEnvelope:
-      type: object
-      required: [error]
-      properties:
-        error:
-          $ref: '#/components/schemas/ErrorDetail'
-
-    # ── Pagination ─────────────────────────────────────────────────────────────
-    PaginationMeta:
-      type: object
-      properties:
-        total:
-          type: integer
-        page:
-          type: integer
-        page_size:
-          type: integer
-        has_next:
-          type: boolean
-
-    # ── Auth ───────────────────────────────────────────────────────────────────
-    LoginRequest:
-      type: object
-      required: [email, password]
-      properties:
-        email:
-          type: string
-          format: email
-        password:
-          type: string
-          format: password
-          minLength: 8
-        totp_code:
-          type: string
-          description: Required when MFA is enabled on the account.
-          pattern: '^\d{6}$'
-
-    TokenPair:
-      type: object
-      required: [access_token, refresh_token, expires_in, token_type]
-      properties:
-        access_token:
-          type: string
-        refresh_token:
-          type: string
-        expires_in:
-          type: integer
-          description: Seconds until access_token expires.
-          example: 900
-        token_type:
-          type: string
-          enum: [Bearer]
-
-    RefreshRequest:
-      type: object
-      required: [refresh_token]
-      properties:
-        refresh_token:
-          type: string
-
-    OAuthCallbackRequest:
-      type: object
-      required: [code, state]
-      properties:
-        code:
-          type: string
-        state:
-          type: string
-
-    RegisterRequest:
-      type: object
-      required: [email, password, name, tenant_name]
-      properties:
-        email:
-          type: string
-          format: email
-        password:
-          type: string
-          format: password
-          minLength: 8
-        name:
-          type: string
-        tenant_name:
-          type: string
-          description: Creates a new tenant. Use invite flow for existing tenants.
-
-    MfaSetupResponse:
-      type: object
-      properties:
-        qr_uri:
-          type: string
-          description: otpauth:// URI for QR rendering.
-        secret:
-          type: string
-          description: Raw TOTP secret for manual entry.
-
-    MfaVerifyRequest:
-      type: object
-      required: [totp_code]
-      properties:
-        totp_code:
-          type: string
-          pattern: '^\d{6}$'
-
-    # ── User ───────────────────────────────────────────────────────────────────
-    User:
-      type: object
-      required: [id, tenant_id, email, role, is_verified, mfa_enabled, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        tenant_id:
-          type: string
-          format: uuid
-        email:
-          type: string
-          format: email
-        role:
-          type: string
-          enum: [OWNER, EDITOR, VIEWER]
-        is_verified:
-          type: boolean
-        mfa_enabled:
-          type: boolean
-        sso_provider:
-          type: string
-          nullable: true
-        last_login_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    # ── API Keys ───────────────────────────────────────────────────────────────
-    ApiKeyCreate:
-      type: object
-      required: [name, scopes]
-      properties:
-        name:
-          type: string
-          maxLength: 100
-        scopes:
-          type: array
-          items:
-            type: string
-            enum:
-              - workflows:read
-              - workflows:write
-              - executions:read
-              - executions:write
-              - executions:trigger
-              - logs:read
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-
-    ApiKeyCreated:
-      type: object
-      description: Full key is returned ONCE at creation time — never retrievable again.
-      required: [id, name, key, key_prefix, scopes, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        key:
-          type: string
-          description: Full API key — store securely, shown only once.
-          example: wfk_01JRXYZ...
-        key_prefix:
-          type: string
-          example: wfk_01JR
-        scopes:
-          type: array
-          items:
-            type: string
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    ApiKeyInfo:
-      type: object
-      description: Safe metadata — never exposes the full key.
-      required: [id, name, key_prefix, scopes, is_active, created_at]
-      properties:
-        id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        key_prefix:
-          type: string
-        scopes:
-          type: array
-          items:
-            type: string
-        is_active:
-          type: boolean
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-        last_used_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    # ── Workflows ──────────────────────────────────────────────────────────────
-    WorkflowMetadata:
-      type: object
-      required: [name]
-      properties:
-        name:
-          type: string
-          maxLength: 200
-        description:
-          type: string
-          maxLength: 2000
-        tags:
-          type: array
-          items:
-            type: string
-          maxItems: 20
-        is_active:
-          type: boolean
-          default: true
-
-    NodePosition:
-      type: object
-      required: [x, y]
-      properties:
-        x:
-          type: number
-          description: Horizontal canvas position in pixels.
-        y:
-          type: number
-          description: Vertical canvas position in pixels.
-
-    NodeUIConfig:
-      type: object
-      description: |
-        Frontend rendering hints. Populated by WorkflowLayoutEngine on DAG generation.
-        Frontend reads these to style and label each node; never used by execution engine.
-      properties:
-        editable:
-          type: boolean
-          default: true
-          description: Whether the node's config can be edited in the UI panel.
-        node_type_label:
-          type: string
-          description: Human-readable display label for the node type badge.
-          example: "AI Prompt"
-        icon:
-          type: string
-          description: Icon identifier (maps to frontend icon registry).
-          example: "sparkles"
-        color:
-          type: string
-          description: Hex colour for the node header band.
-          example: "#6366f1"
-        category:
-          type: string
-          enum: [ai_reasoning, execution_data, workflow_management, logic_orchestration, triggers]
-          description: Node category for palette grouping.
-        is_terminal:
-          type: boolean
-          default: false
-          description: True for output/trigger nodes — prevents deletion in UI.
-
-    WorkflowUIMetadata:
-      type: object
-      description: Frontend-specific workflow metadata. Not used by execution engine.
-      properties:
-        layout:
-          type: string
-          enum: [auto, manual]
-          default: auto
-          description: |
-            auto — positions were set by WorkflowLayoutEngine.
-            manual — user has moved nodes; preserve exact positions.
-        version:
-          type: string
-          default: "1.0"
-        viewport:
-          type: object
-          description: Last saved React Flow viewport (pan + zoom).
-          properties:
-            x: { type: number, default: 0 }
-            y: { type: number, default: 0 }
-            zoom: { type: number, default: 1 }
-        generated_by_chat:
-          type: boolean
-          default: false
-          description: True when this workflow was created via the chat DAG generator.
-        chat_session_id:
-          type: string
-          nullable: true
-          description: Session ID of the generating chat conversation, if applicable.
-
-    WorkflowDefinition:
-      type: object
-      description: |
-        Graph definition. nodes is a dict keyed by node_id.
-        edges connect output ports to input ports.
-        ui_metadata carries React Flow viewport state and layout hints.
-      required: [nodes, edges]
-      properties:
-        nodes:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/NodeDefinition'
-        edges:
-          type: array
-          items:
-            $ref: '#/components/schemas/EdgeDefinition'
-        ui_metadata:
-          $ref: '#/components/schemas/WorkflowUIMetadata'
-
-    NodeDefinition:
-      type: object
-      required: [type, config]
-      properties:
-        type:
-          type: string
-          description: |
-            Node type identifier. Each workflow must have exactly one trigger node
-            (manual_trigger, scheduled_trigger, or integration_trigger) as its root.
-          enum:
-            # AI & Reasoning
-            - prompt
-            - agent
-            - semantic_search
-            # Execution & Data
-            - code_execution
-            - api_request
-            - templating
-            - web_search
-            - mcp
-            # Workflow Management
-            - set_state
-            - custom
-            - note
-            - output
-            # Logic & Orchestration
-            - control_flow
-            - subworkflow
-            # Triggers
-            - manual_trigger
-            - scheduled_trigger
-            - integration_trigger
-        config:
-          type: object
-          description: Node-type-specific configuration object. Schema varies by type.
-        position:
-          $ref: '#/components/schemas/NodePosition'
-        ui_config:
-          $ref: '#/components/schemas/NodeUIConfig'
-
-    EdgeDefinition:
-      type: object
-      required: [id, source_node_id, source_port, target_node_id, target_port]
-      properties:
-        id:
-          type: string
-          description: Unique edge identifier (used by React Flow as edge key).
-          example: "edge_node1_output__node2_input"
-        source_node_id:
-          type: string
-        source_port:
-          type: string
-          description: Output port name on source node (e.g. "output", "true", "false").
-        target_node_id:
-          type: string
-        target_port:
-          type: string
-          description: Input port name on target node (e.g. "input").
-
-    WorkflowSummary:
-      type: object
-      required: [workflow_id, tenant_id, metadata, version_no, created_at, updated_at]
-      properties:
-        workflow_id:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        metadata:
-          $ref: '#/components/schemas/WorkflowMetadata'
-        version_no:
-          type: integer
-          description: Latest published version number.
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    WorkflowDetail:
-      allOf:
-        - $ref: '#/components/schemas/WorkflowSummary'
-        - type: object
-          required: [definition]
-          properties:
-            definition:
-              $ref: '#/components/schemas/WorkflowDefinition'
-
-    WorkflowCreate:
-      type: object
-      required: [definition, metadata]
-      properties:
-        definition:
-          $ref: '#/components/schemas/WorkflowDefinition'
-        metadata:
-          $ref: '#/components/schemas/WorkflowMetadata'
-
-    WorkflowUpdate:
-      type: object
-      properties:
-        definition:
-          $ref: '#/components/schemas/WorkflowDefinition'
-        metadata:
-          $ref: '#/components/schemas/WorkflowMetadata'
-        publish:
-          type: boolean
-          description: If true, saves a new version snapshot.
-          default: false
-
-    # ── Workflow Versions ──────────────────────────────────────────────────────
-    WorkflowVersionSummary:
-      type: object
-      required: [version_id, workflow_id, version_no, sdk_version, created_by, created_at]
-      properties:
-        version_id:
-          type: string
-        workflow_id:
-          type: string
-        version_no:
-          type: integer
-        sdk_version:
-          type: string
-          example: "1.0.0"
-        change_summary:
-          type: string
-          nullable: true
-        created_by:
-          type: string
-          format: uuid
-        created_at:
-          type: string
-          format: date-time
-
-    WorkflowVersionDetail:
-      allOf:
-        - $ref: '#/components/schemas/WorkflowVersionSummary'
-        - type: object
-          required: [definition]
-          properties:
-            definition:
-              $ref: '#/components/schemas/WorkflowDefinition'
-
-    # ── Executions ─────────────────────────────────────────────────────────────
-    TriggerRequest:
-      type: object
-      properties:
-        input:
-          type: object
-          description: Trigger payload. Shape validated against workflow's trigger schema.
-        version_no:
-          type: integer
-          nullable: true
-          description: Pin to a specific version. Omit to use the latest published version.
-
-    ExecutionRun:
-      type: object
-      required: [run_id, tenant_id, workflow_id, status, started_at]
-      properties:
-        run_id:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        workflow_id:
-          type: string
-        version_no:
-          type: integer
-        status:
-          type: string
-          enum: [QUEUED, RUNNING, SUCCESS, FAILED, CANCELLED, WAITING_HUMAN]
-        trigger_input:
-          type: object
-          description: Original trigger payload (may be redacted by PII policy).
-        output:
-          type: object
-          nullable: true
-          description: Final workflow output. Null if not yet complete.
-        error:
-          type: object
-          nullable: true
-          properties:
-            node_id:
-              type: string
-            message:
-              type: string
-            traceback:
-              type: string
-        started_at:
-          type: string
-          format: date-time
-        ended_at:
-          type: string
-          format: date-time
-          nullable: true
-        retention_expires_at:
-          type: string
-          format: date-time
-          nullable: true
-
-    NodeExecutionState:
-      type: object
-      required: [node_id, run_id, status]
-      properties:
-        node_id:
-          type: string
-        run_id:
-          type: string
-        status:
-          type: string
-          enum: [PENDING, RUNNING, SUCCESS, FAILED, SKIPPED, WAITING_HUMAN]
-        input:
-          type: object
-          nullable: true
-        output:
-          type: object
-          nullable: true
-        error_message:
-          type: string
-          nullable: true
-        started_at:
-          type: string
-          format: date-time
-          nullable: true
-        ended_at:
-          type: string
-          format: date-time
-          nullable: true
-        duration_ms:
-          type: integer
-          nullable: true
-        isolation_tier:
-          type: integer
-          minimum: 0
-          maximum: 3
-
-    HumanInputSubmit:
-      type: object
-      required: [run_id, node_id, response]
-      properties:
-        run_id:
-          type: string
-        node_id:
-          type: string
-        response:
-          type: object
-          description: Free-form response matching the node's expected schema.
-        approved:
-          type: boolean
-          description: For approval gates — true to proceed, false to reject.
-
-    # ── Execution Logs ─────────────────────────────────────────────────────────
-    LogEntry:
-      type: object
-      required: [timestamp, level, node_id, message]
-      properties:
-        timestamp:
-          type: string
-          format: date-time
-        level:
-          type: string
-          enum: [DEBUG, INFO, WARNING, ERROR]
-        run_id:
-          type: string
-        node_id:
-          type: string
-        message:
-          type: string
-        metadata:
-          type: object
-          nullable: true
-
-    # ── Schedules ──────────────────────────────────────────────────────────────
-    ScheduleCreate:
-      type: object
-      required: [cron_expression, timezone]
-      properties:
-        cron_expression:
-          type: string
-          description: Standard 5-field cron expression.
-          example: "0 9 * * MON-FRI"
-        timezone:
-          type: string
-          description: IANA timezone identifier.
-          example: "America/New_York"
-        trigger_input:
-          type: object
-          description: Static payload to inject at each fire.
-        is_active:
-          type: boolean
-          default: true
-
-    Schedule:
-      allOf:
-        - $ref: '#/components/schemas/ScheduleCreate'
-        - type: object
-          required: [schedule_id, workflow_id, next_fire_at, created_at]
-          properties:
-            schedule_id:
-              type: string
-            workflow_id:
-              type: string
-            next_fire_at:
-              type: string
-              format: date-time
-            last_fired_at:
-              type: string
-              format: date-time
-              nullable: true
-            created_at:
-              type: string
-              format: date-time
-
-    # ── Webhooks ───────────────────────────────────────────────────────────────
-    WebhookCreate:
-      type: object
-      required: [name, events, target_url]
-      properties:
-        name:
-          type: string
-        events:
-          type: array
-          items:
-            type: string
-            enum:
-              - execution.started
-              - execution.succeeded
-              - execution.failed
-              - execution.cancelled
-              - human_input.required
-        target_url:
-          type: string
-          format: uri
-        secret:
-          type: string
-          description: HMAC-SHA256 signing secret. Stored hashed — shown once.
-          nullable: true
-        is_active:
-          type: boolean
-          default: true
-
-    Webhook:
-      allOf:
-        - $ref: '#/components/schemas/WebhookCreate'
-        - type: object
-          required: [webhook_id, created_at]
-          properties:
-            webhook_id:
-              type: string
-            created_at:
-              type: string
-              format: date-time
-
-    # ── Audit Log ──────────────────────────────────────────────────────────────
-    AuditEvent:
-      type: object
-      required: [event_id, tenant_id, event_type, resource_id, created_at]
-      properties:
-        event_id:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        user_id:
-          type: string
-          format: uuid
-          nullable: true
-        event_type:
-          type: string
-          example: workflow.published
-        resource_id:
-          type: string
-        old_value:
-          type: object
-          nullable: true
-        new_value:
-          type: object
-          nullable: true
-        ip_address:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    # ── Usage / Billing ────────────────────────────────────────────────────────
-    UsageSummary:
-      type: object
-      required: [tenant_id, period_start, period_end, execution_count, total_cost_usd]
-      properties:
-        tenant_id:
-          type: string
-          format: uuid
-        period_start:
-          type: string
-          format: date-time
-        period_end:
-          type: string
-          format: date-time
-        execution_count:
-          type: integer
-        node_exec_count:
-          type: integer
-        total_input_tokens:
-          type: integer
-        total_output_tokens:
-          type: integer
-        total_compute_secs:
-          type: number
-        total_cost_usd:
-          type: number
-          format: double
-
-    # ── Team Management ───────────────────────────────────────────────────────
-    UserInvite:
-      type: object
-      required: [email, role]
-      properties:
-        email:
-          type: string
-          format: email
-        role:
-          type: string
-          enum: [ADMIN, EDITOR, VIEWER]
-          description: Role to assign. OWNER cannot be granted via invite.
-
-    UserRoleUpdate:
-      type: object
-      required: [role]
-      properties:
-        role:
-          type: string
-          enum: [ADMIN, EDITOR, VIEWER]
-
-    PendingInvite:
-      type: object
-      required: [invite_id, email, role, invited_by, created_at]
-      properties:
-        invite_id:
-          type: string
-          format: uuid
-        email:
-          type: string
-          format: email
-        role:
-          type: string
-          enum: [ADMIN, EDITOR, VIEWER]
-        invited_by:
-          type: string
-          format: uuid
-        created_at:
-          type: string
-          format: date-time
-        expires_at:
-          type: string
-          format: date-time
-
-    # ── Integrations / OAuth Connections ──────────────────────────────────────
-    OAuthConnection:
-      type: object
-      required: [connection_id, provider, status, created_at]
-      properties:
-        connection_id:
-          type: string
-          format: uuid
-        provider:
-          type: string
-          description: Provider identifier matching CONNECTOR_NAME (e.g. "slack", "github", "email").
-          example: slack
-        account_name:
-          type: string
-          nullable: true
-          description: Display name of the connected account (e.g. workspace name, email).
-          example: "My Workspace"
-        status:
-          type: string
-          enum: [active, expired, error]
-        scopes:
-          type: array
-          items:
-            type: string
-          description: OAuth scopes granted by this connection.
-        expires_at:
-          type: string
-          format: date-time
-          nullable: true
-        last_used_at:
-          type: string
-          format: date-time
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-
-    # ── Health ─────────────────────────────────────────────────────────────────
-    HealthResponse:
-      type: object
-      required: [status, version, checks]
-      properties:
-        status:
-          type: string
-          enum: [healthy, degraded, unhealthy]
-        version:
-          type: string
-          example: "1.0.0"
-        checks:
-          type: object
-          additionalProperties:
-            type: string
-            enum: [ok, error]
-          example:
-            postgres: ok
-            mongodb: ok
-            redis: ok
-
-  # ── Chat ──────────────────────────────────────────────────────────────────
-    ConversationPhase:
-      type: string
-      enum: [GATHERING, CLARIFYING, FINALIZING, GENERATING, COMPLETE]
-      description: |
-        Lifecycle phase of a chat session:
-        - GATHERING: collecting initial requirements
-        - CLARIFYING: asking follow-up questions for missing fields
-        - FINALIZING: all requirements gathered, ready to generate
-        - GENERATING: DAG generation in progress
-        - COMPLETE: workflow successfully generated and saved
-
-    RequirementSpec:
-      type: object
-      description: Structured requirements extracted from the conversation.
-      properties:
-        goal:
-          type: string
-          description: High-level description of what the workflow should achieve.
-        trigger_type:
-          type: string
-          enum: [manual, scheduled, webhook]
-        trigger_config:
-          type: object
-          additionalProperties: true
-        input_sources:
-          type: array
-          items: { type: string }
-        processing_steps:
-          type: array
-          items:
-            type: object
-            properties:
-              description: { type: string }
-              suggested_node_type: { type: string }
-              config_hints:
-                type: object
-                additionalProperties: true
-        integrations:
-          type: array
-          items: { type: string }
-        output_format:
-          type: string
-        constraints:
-          type: object
-          additionalProperties: true
-
-    ChatMessage:
-      type: object
-      required: [id, role, content, ts]
-      properties:
-        id:
-          type: string
-        role:
-          type: string
-          enum: [user, assistant]
-        content:
-          type: string
-        ts:
-          type: string
-          format: date-time
-
-    ChatSession:
-      type: object
-      required: [session_id, tenant_id, phase, created_at, updated_at]
-      properties:
-        session_id:
-          type: string
-        tenant_id:
-          type: string
-          format: uuid
-        user_id:
-          type: string
-          format: uuid
-        title:
-          type: string
-        phase:
-          $ref: '#/components/schemas/ConversationPhase'
-        generated_workflow_id:
-          type: string
-          nullable: true
-        clarification_round:
-          type: integer
-          default: 0
-        created_at:
-          type: string
-          format: date-time
-        updated_at:
-          type: string
-          format: date-time
-
-    ChatSessionDetail:
-      allOf:
-        - $ref: '#/components/schemas/ChatSession'
-        - type: object
-          properties:
-            messages:
-              type: array
-              items:
-                $ref: '#/components/schemas/ChatMessage'
-            requirement_spec:
-              $ref: '#/components/schemas/RequirementSpec'
-
-    ClarificationQuestion:
-      type: object
-      required: [id, question, input_type]
-      description: |
-        A single structured clarification question returned by the ClarificationEngine.
-        Frontend renders each question according to its input_type.
-      properties:
-        id:
-          type: string
-          description: Stable question identifier (e.g. "q_trigger_type").
-        question:
-          type: string
-          description: Human-readable question text.
-          example: "What should trigger this workflow?"
-        input_type:
-          type: string
-          enum: [text, select, multiselect, boolean, number]
-          description: |
-            UI input widget to render:
-            - text: free-form text input
-            - select: single-choice dropdown (options provided)
-            - multiselect: multi-choice (options provided)
-            - boolean: yes/no toggle
-            - number: numeric input
-        options:
-          type: array
-          items: { type: string }
-          description: Choices for select/multiselect questions. Empty for text/boolean/number.
-          example: ["manual", "scheduled", "webhook"]
-        hint:
-          type: string
-          description: Optional placeholder / helper text shown below the input.
-        required:
-          type: boolean
-          default: true
-          description: Whether an answer is required to advance.
-        maps_to_field:
-          type: string
-          description: Which RequirementSpec field this answer populates.
-          example: "trigger_type"
-
-    ClarificationBlock:
-      type: object
-      description: |
-        Structured clarification payload returned when phase is CLARIFYING.
-        Frontend renders each question using its input_type.
-      required: [type, questions]
-      properties:
-        type:
-          type: string
-          enum: [clarification]
-        questions:
-          type: array
-          items:
-            $ref: '#/components/schemas/ClarificationQuestion'
-          minItems: 1
-          maxItems: 3
-
-    WorkflowUpdateRequest:
-      type: object
-      description: Payload sent from frontend when user modifies the generated DAG.
-      required: [nodes, edges]
-      properties:
-        workflow_id:
-          type: string
-          description: ID of the workflow being edited. Used for audit trail.
-        updated_nodes:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/NodeDefinition'
-          description: Full node map after edits (replaces entire nodes dict).
-        updated_edges:
-          type: array
-          items:
-            $ref: '#/components/schemas/EdgeDefinition'
-          description: Full edge list after edits.
-        ui_metadata:
-          $ref: '#/components/schemas/WorkflowUIMetadata'
-          description: Updated viewport + layout mode from frontend.
-
-    WorkflowUpdateResponse:
-      type: object
-      description: Validation result returned after frontend submits workflow edits.
-      required: [valid, workflow]
-      properties:
-        valid:
-          type: boolean
-        workflow:
-          $ref: '#/components/schemas/WorkflowDefinition'
-        validation_errors:
-          type: array
-          items:
-            type: object
-            properties:
-              code: { type: string }
-              message: { type: string }
-              node_id: { type: string, nullable: true }
-          description: Present only when valid is false.
-        suggestions:
-          type: array
-          items: { type: string }
-          description: Optional AI-generated improvement hints (e.g. "Consider adding an error handler after node_3").
-
-    ChatMessageResponse:
-      type: object
-      required: [session_id, phase, reply]
-      properties:
-        session_id:
-          type: string
-        phase:
-          $ref: '#/components/schemas/ConversationPhase'
-        reply:
-          type: string
-          description: AI-generated conversational text response.
-        clarification:
-          $ref: '#/components/schemas/ClarificationBlock'
-          nullable: true
-          description: |
-            Structured clarification block. Populated only when phase is CLARIFYING.
-            Frontend renders each question with the appropriate input widget.
-        requirement_spec:
-          $ref: '#/components/schemas/RequirementSpec'
-          nullable: true
-          description: Latest extracted requirement spec snapshot after this message.
-        workflow_preview:
-          $ref: '#/components/schemas/WorkflowDefinition'
-          nullable: true
-          description: |
-            Populated when phase transitions to GENERATING or COMPLETE.
-            Includes ui_config on every node and ui_metadata for the React Flow canvas.
-        workflow_id:
-          type: string
-          nullable: true
-          description: ID of the saved workflow when phase is COMPLETE.
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Reusable Responses
-  # ───────────────────────────────────────────────────────────────────────────
-
-  responses:
-    Unauthorized:
-      description: Missing or invalid authentication credentials.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-          example:
-            error:
-              code: UNAUTHORIZED
-              message: "Bearer token is missing or expired."
-              request_id: req_01JRXYZ
-
-    Forbidden:
-      description: Authenticated but insufficient permissions.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-
-    NotFound:
-      description: Resource not found (or not visible to this tenant).
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-
-    Conflict:
-      description: Resource state conflict (e.g. duplicate slug, optimistic lock).
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-
-    UnprocessableEntity:
-      description: Validation error — request body failed schema or business rules.
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-
-    TooManyRequests:
-      description: Rate limit or quota exceeded.
-      headers:
-        Retry-After:
-          schema:
-            type: integer
-          description: Seconds until the limit resets.
-        X-RateLimit-Limit:
-          schema:
-            type: integer
-        X-RateLimit-Remaining:
-          schema:
-            type: integer
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorEnvelope'
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Reusable Parameters
-  # ───────────────────────────────────────────────────────────────────────────
-
-  parameters:
-    WorkflowId:
-      name: workflow_id
-      in: path
-      required: true
-      schema:
-        type: string
-      description: Workflow identifier (e.g. wf_01JRXYZ).
-
-    RunId:
-      name: run_id
-      in: path
-      required: true
-      schema:
-        type: string
-
-    VersionNo:
-      name: version_no
-      in: path
-      required: true
-      schema:
-        type: integer
-
-    ScheduleId:
-      name: schedule_id
-      in: path
-      required: true
-      schema:
-        type: string
-
-    WebhookId:
-      name: webhook_id
-      in: path
-      required: true
-      schema:
-        type: string
-
-    KeyId:
-      name: key_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-
-    UserId:
-      name: user_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-
-    ConnectionId:
-      name: connection_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-
-    PageParam:
-      name: page
-      in: query
-      schema:
-        type: integer
-        minimum: 1
-        default: 1
-
-    PageSizeParam:
-      name: page_size
-      in: query
-      schema:
-        type: integer
-        minimum: 1
-        maximum: 100
-        default: 20
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Global Security (overridable per-operation)
-# ─────────────────────────────────────────────────────────────────────────────
-
-security:
-  - BearerAuth: []
-  - ApiKeyAuth: []
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Tags
-# ─────────────────────────────────────────────────────────────────────────────
-
-tags:
-  - name: Health
-    description: Service health and readiness probes.
-  - name: Auth
-    description: Authentication — login, OAuth, MFA, token lifecycle.
-  - name: Users
-    description: Current user profile and API key management.
-  - name: Workflows
-    description: Workflow CRUD and publishing.
-  - name: Versions
-    description: Immutable workflow version snapshots.
-  - name: Executions
-    description: Trigger, monitor, and cancel workflow runs.
-  - name: Nodes
-    description: Per-node execution state and human-input responses.
-  - name: Logs
-    description: Structured execution logs.
-  - name: Schedules
-    description: Cron-based workflow scheduling.
-  - name: Webhooks
-    description: Outbound event delivery configuration.
-  - name: Audit
-    description: Append-only tenant audit trail.
-  - name: Usage
-    description: Billing usage summaries.
-  - name: Team
-    description: Tenant team management — invite, role changes, removal.
-  - name: Integrations
-    description: OAuth connections and third-party credential management.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Paths
-# ─────────────────────────────────────────────────────────────────────────────
-
 paths:
-
-  # ── Health ───────────────────────────────────────────────────────────────────
-
   /health:
     get:
-      operationId: health_check
-      tags: [Health]
-      summary: Liveness + dependency check
-      security: []
+      tags:
+      - Health
+      summary: Liveness probe
+      description: Returns 200 when the API process is running.
+      operationId: health_health_get
       responses:
         '200':
-          description: All dependencies healthy.
+          description: Successful Response
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/HealthResponse'
-        '503':
-          description: One or more dependencies are unhealthy.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/HealthResponse'
-
+              schema: {}
   /health/ready:
     get:
-      operationId: readiness_check
-      tags: [Health]
-      summary: Kubernetes readiness probe
-      security: []
+      tags:
+      - Health
+      summary: Readiness probe
+      description: Returns 200 when all downstream dependencies are reachable.
+      operationId: health_ready_health_ready_get
       responses:
         '200':
-          description: Ready to serve traffic.
-        '503':
-          description: Not ready.
-
-  # ── Auth ─────────────────────────────────────────────────────────────────────
-
-  /auth/register:
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+  /api/v1/auth/register:
     post:
-      operationId: auth_register
-      tags: [Auth]
-      summary: Create a new tenant + owner account
-      security: []
+      tags:
+      - Auth
+      summary: Register
+      description: Register a new user account.
+      operationId: register_api_v1_auth_register_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/RegisterRequest'
+        required: true
       responses:
         '201':
-          description: Account created. Email verification sent.
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenPair'
-        '409':
-          $ref: '#/components/responses/Conflict'
+                additionalProperties: true
+                type: object
+                title: Response Register Api V1 Auth Register Post
         '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /auth/login:
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/login:
     post:
-      operationId: auth_login
-      tags: [Auth]
-      summary: Email + password login
-      security: []
+      tags:
+      - Auth
+      summary: Login
+      description: Authenticate and return JWT access + refresh tokens.
+      operationId: login_api_v1_auth_login_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/LoginRequest'
+        required: true
       responses:
         '200':
-          description: Login successful.
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenPair'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+                additionalProperties: true
+                type: object
+                title: Response Login Api V1 Auth Login Post
         '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /auth/logout:
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/logout:
     post:
-      operationId: auth_logout
-      tags: [Auth]
-      summary: Revoke refresh token
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RefreshRequest'
+      tags:
+      - Auth
+      summary: Logout
+      description: Invalidate the current session / refresh token.
+      operationId: logout_api_v1_auth_logout_post
       responses:
         '204':
-          description: Token revoked.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /auth/token/refresh:
+          description: Successful Response
+  /api/v1/auth/token/refresh:
     post:
-      operationId: auth_token_refresh
-      tags: [Auth]
-      summary: Rotate refresh token → new token pair
-      security: []
+      tags:
+      - Auth
+      summary: Refresh Token
+      description: Issue a new access token using a valid refresh token.
+      operationId: refresh_token_api_v1_auth_token_refresh_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RefreshRequest'
+              $ref: '#/components/schemas/TokenRefreshRequest'
+        required: true
       responses:
         '200':
-          description: New token pair issued.
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TokenPair'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /auth/verify-email:
-    post:
-      operationId: auth_verify_email
-      tags: [Auth]
-      summary: Verify email address with token from email link
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [token]
-              properties:
-                token:
-                  type: string
-      responses:
-        '200':
-          description: Email verified.
-        '400':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /auth/password/reset-request:
-    post:
-      operationId: auth_password_reset_request
-      tags: [Auth]
-      summary: Send password reset email
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [email]
-              properties:
-                email:
-                  type: string
-                  format: email
-      responses:
-        '204':
-          description: Reset email sent (if account exists — response is always 204 to prevent enumeration).
-
-  /auth/password/reset:
-    post:
-      operationId: auth_password_reset
-      tags: [Auth]
-      summary: Set new password using reset token
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [token, new_password]
-              properties:
-                token:
-                  type: string
-                new_password:
-                  type: string
-                  format: password
-                  minLength: 8
-      responses:
-        '200':
-          description: Password updated.
-        '400':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /auth/oauth/{provider}:
-    get:
-      operationId: auth_oauth_redirect
-      tags: [Auth]
-      summary: Initiate OAuth2 flow (redirects to provider)
-      security: []
-      parameters:
-        - name: provider
-          in: path
-          required: true
-          schema:
-            type: string
-            enum: [google, github, microsoft]
-      responses:
-        '302':
-          description: Redirect to OAuth provider.
-
-  /auth/oauth/{provider}/callback:
-    post:
-      operationId: auth_oauth_callback
-      tags: [Auth]
-      summary: Handle OAuth2 callback and issue tokens
-      security: []
-      parameters:
-        - name: provider
-          in: path
-          required: true
-          schema:
-            type: string
-            enum: [google, github, microsoft]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/OAuthCallbackRequest'
-      responses:
-        '200':
-          description: Authentication successful.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TokenPair'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /auth/mfa/setup:
-    post:
-      operationId: auth_mfa_setup
-      tags: [Auth]
-      summary: Generate TOTP secret for MFA enrollment
-      responses:
-        '200':
-          description: TOTP provisioning details.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MfaSetupResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /auth/mfa/verify:
-    post:
-      operationId: auth_mfa_verify
-      tags: [Auth]
-      summary: Confirm TOTP code to enable MFA
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/MfaVerifyRequest'
-      responses:
-        '200':
-          description: MFA enabled. Backup codes returned.
-          content:
-            application/json:
-              schema:
+                additionalProperties: true
                 type: object
-                properties:
-                  backup_codes:
-                    type: array
-                    items:
-                      type: string
-        '400':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /auth/mfa/disable:
-    post:
-      operationId: auth_mfa_disable
-      tags: [Auth]
-      summary: Disable MFA (requires current TOTP code)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/MfaVerifyRequest'
-      responses:
-        '204':
-          description: MFA disabled.
-        '400':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  # ── Users (self-service) ──────────────────────────────────────────────────────
-
-  /users/me:
-    get:
-      operationId: users_get_me
-      tags: [Users]
-      summary: Get current user profile
-      responses:
-        '200':
-          description: Current user.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/User'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    patch:
-      operationId: users_update_me
-      tags: [Users]
-      summary: Update current user profile
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                email:
-                  type: string
-                  format: email
-                current_password:
-                  type: string
-                  format: password
-                  description: Required when changing password or email.
-                new_password:
-                  type: string
-                  format: password
-                  minLength: 8
-      responses:
-        '200':
-          description: Profile updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/User'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /users/me/api-keys:
-    get:
-      operationId: users_list_api_keys
-      tags: [Users]
-      summary: List API keys for current user
-      responses:
-        '200':
-          description: API key list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ApiKeyInfo'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: users_create_api_key
-      tags: [Users]
-      summary: Create a new API key
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ApiKeyCreate'
-      responses:
-        '201':
-          description: API key created. Full key shown only once.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiKeyCreated'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /users/me/api-keys/{key_id}:
-    delete:
-      operationId: users_revoke_api_key
-      tags: [Users]
-      summary: Revoke an API key
-      parameters:
-        - $ref: '#/components/parameters/KeyId'
-      responses:
-        '204':
-          description: Key revoked.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Workflows ─────────────────────────────────────────────────────────────────
-
-  /workflows:
-    get:
-      operationId: workflows_list
-      tags: [Workflows]
-      summary: List workflows for the current tenant
-      parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-        - name: is_active
-          in: query
-          schema:
-            type: boolean
-        - name: search
-          in: query
-          schema:
-            type: string
-          description: Filter by workflow name (prefix match).
-        - name: sort_by
-          in: query
-          schema:
-            type: string
-            enum: [updated_at, name]
-            default: updated_at
-        - name: order
-          in: query
-          schema:
-            type: string
-            enum: [asc, desc]
-            default: desc
-      responses:
-        '200':
-          description: Paginated workflow list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/WorkflowSummary'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: workflows_create
-      tags: [Workflows]
-      summary: Create a new workflow
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WorkflowCreate'
-      responses:
-        '201':
-          description: Workflow created.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
+                title: Response Refresh Token Api V1 Auth Token Refresh Post
         '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-        '429':
-          $ref: '#/components/responses/TooManyRequests'
-
-  /workflows/{workflow_id}:
-    get:
-      operationId: workflows_get
-      tags: [Workflows]
-      summary: Get workflow definition (latest draft)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      responses:
-        '200':
-          description: Workflow detail.
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkflowDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    patch:
-      operationId: workflows_update
-      tags: [Workflows]
-      summary: Update workflow definition and/or metadata
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/verify-email:
+    post:
+      tags:
+      - Auth
+      summary: Verify Email
+      description: Verify email address using the token sent by email.
+      operationId: verify_email_api_v1_auth_verify_email_post
       parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      requestBody:
+      - name: token
+        in: query
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WorkflowUpdate'
+        schema:
+          type: string
+          title: Token
       responses:
         '200':
-          description: Workflow updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-    delete:
-      operationId: workflows_delete
-      tags: [Workflows]
-      summary: Delete a workflow (soft delete — OWNER only)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      responses:
-        '204':
-          description: Workflow deleted.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /workflows/{workflow_id}/activate:
-    post:
-      operationId: workflows_activate
-      tags: [Workflows]
-      summary: Activate a workflow (EDITOR+ required)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      responses:
-        '200':
-          description: Workflow activated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /workflows/{workflow_id}/deactivate:
-    post:
-      operationId: workflows_deactivate
-      tags: [Workflows]
-      summary: Deactivate a workflow (stops schedules and new triggers)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      responses:
-        '200':
-          description: Workflow deactivated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowSummary'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Workflow Versions ─────────────────────────────────────────────────────────
-
-  /workflows/{workflow_id}/versions:
-    get:
-      operationId: workflow_versions_list
-      tags: [Versions]
-      summary: List published versions for a workflow
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-      responses:
-        '200':
-          description: Version list (newest first).
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/WorkflowVersionSummary'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /workflows/{workflow_id}/versions/{version_no}:
-    get:
-      operationId: workflow_versions_get
-      tags: [Versions]
-      summary: Get a specific version snapshot (immutable)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/VersionNo'
-      responses:
-        '200':
-          description: Version detail.
+                additionalProperties: true
+                title: Response Verify Email Api V1 Auth Verify Email Post
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkflowVersionDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /workflows/{workflow_id}/versions/{version_no}/restore:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/password/reset-request:
     post:
-      operationId: workflow_versions_restore
-      tags: [Versions]
-      summary: Restore a version as the current draft (creates new version on next publish)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/VersionNo'
-      responses:
-        '200':
-          description: Draft restored from version.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/WorkflowDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Executions ────────────────────────────────────────────────────────────────
-
-  /workflows/{workflow_id}/trigger:
-    post:
-      operationId: executions_trigger
-      tags: [Executions]
-      summary: Trigger a workflow execution (async — returns run_id immediately)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
+      tags:
+      - Auth
+      summary: Password Reset Request
+      operationId: password_reset_request_api_v1_auth_password_reset_request_post
       requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Password Reset Request Api V1 Auth Password Reset
+                  Request Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/password/reset:
+    post:
+      tags:
+      - Auth
+      summary: Password Reset
+      operationId: password_reset_api_v1_auth_password_reset_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Password Reset Api V1 Auth Password Reset Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/mfa/setup:
+    post:
+      tags:
+      - Auth
+      summary: Mfa Setup
+      description: Initiate MFA TOTP setup — returns QR code URI.
+      operationId: mfa_setup_api_v1_auth_mfa_setup_post
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Mfa Setup Api V1 Auth Mfa Setup Post
+  /api/v1/auth/mfa/verify:
+    post:
+      tags:
+      - Auth
+      summary: Mfa Verify
+      operationId: mfa_verify_api_v1_auth_mfa_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MFAVerifyRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Mfa Verify Api V1 Auth Mfa Verify Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/oauth/{provider}:
+    get:
+      tags:
+      - Auth
+      summary: Oauth Redirect
+      description: Initiate OAuth flow for a provider (google, github, microsoft).
+      operationId: oauth_redirect_api_v1_auth_oauth__provider__get
+      parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Provider
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/auth/oauth/{provider}/callback:
+    get:
+      tags:
+      - Auth
+      summary: Oauth Callback
+      description: Handle OAuth callback and return platform tokens.
+      operationId: oauth_callback_api_v1_auth_oauth__provider__callback_get
+      parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Provider
+      - name: code
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Code
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Oauth Callback Api V1 Auth Oauth  Provider  Callback
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/users/me:
+    get:
+      tags:
+      - Users
+      summary: Get Me
+      description: Return the authenticated user's profile.
+      operationId: get_me_api_v1_users_me_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
         required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Me Api V1 Users Me Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    patch:
+      tags:
+      - Users
+      summary: Update Me
+      description: Update the authenticated user's profile.
+      operationId: update_me_api_v1_users_me_patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchUserRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Update Me Api V1 Users Me Patch
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/users/me/api-keys:
+    get:
+      tags:
+      - Users
+      summary: List Api Keys
+      description: List all API keys for the current user.
+      operationId: list_api_keys_api_v1_users_me_api_keys_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Api Keys Api V1 Users Me Api Keys Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - Users
+      summary: Create Api Key
+      description: Create a new API key. The raw key is only returned once.
+      operationId: create_api_key_api_v1_users_me_api_keys_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAPIKeyRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Create Api Key Api V1 Users Me Api Keys Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/users/me/api-keys/{key_id}:
+    delete:
+      tags:
+      - Users
+      summary: Delete Api Key
+      description: Revoke an API key.
+      operationId: delete_api_key_api_v1_users_me_api_keys__key_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: key_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Key Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows:
+    get:
+      tags:
+      - Workflows
+      summary: List Workflows
+      operationId: list_workflows_api_v1_workflows_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: skip
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Skip
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          default: 20
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Workflows Api V1 Workflows Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - Workflows
+      summary: Create Workflow
+      operationId: create_workflow_api_v1_workflows_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Create Workflow Api V1 Workflows Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}:
+    get:
+      tags:
+      - Workflows
+      summary: Get Workflow
+      operationId: get_workflow_api_v1_workflows__workflow_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Workflow Api V1 Workflows  Workflow Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    patch:
+      tags:
+      - Workflows
+      summary: Update Workflow
+      operationId: update_workflow_api_v1_workflows__workflow_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchWorkflowRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Update Workflow Api V1 Workflows  Workflow Id  Patch
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - Workflows
+      summary: Delete Workflow
+      operationId: delete_workflow_api_v1_workflows__workflow_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/activate:
+    post:
+      tags:
+      - Workflows
+      summary: Activate Workflow
+      operationId: activate_workflow_api_v1_workflows__workflow_id__activate_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Activate Workflow Api V1 Workflows  Workflow Id  Activate
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/deactivate:
+    post:
+      tags:
+      - Workflows
+      summary: Deactivate Workflow
+      operationId: deactivate_workflow_api_v1_workflows__workflow_id__deactivate_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Deactivate Workflow Api V1 Workflows  Workflow Id  Deactivate
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/versions:
+    get:
+      tags:
+      - Workflows
+      summary: List Versions
+      operationId: list_versions_api_v1_workflows__workflow_id__versions_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Versions Api V1 Workflows  Workflow Id  Versions
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/versions/{version_no}:
+    get:
+      tags:
+      - Workflows
+      summary: Get Version
+      operationId: get_version_api_v1_workflows__workflow_id__versions__version_no__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: version_no
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Version No
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Version Api V1 Workflows  Workflow Id  Versions  Version
+                  No  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/versions/{version_no}/restore:
+    post:
+      tags:
+      - Workflows
+      summary: Restore Version
+      operationId: restore_version_api_v1_workflows__workflow_id__versions__version_no__restore_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: version_no
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Version No
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Restore Version Api V1 Workflows  Workflow Id  Versions  Version
+                  No  Restore Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/schedules:
+    get:
+      tags:
+      - Workflows
+      summary: List Schedules
+      operationId: list_schedules_api_v1_workflows__workflow_id__schedules_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Schedules Api V1 Workflows  Workflow Id  Schedules
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - Workflows
+      summary: Create Schedule
+      operationId: create_schedule_api_v1_workflows__workflow_id__schedules_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              title: Body
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Create Schedule Api V1 Workflows  Workflow Id  Schedules
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/workflows/{workflow_id}/trigger:
+    post:
+      tags:
+      - Executions
+      summary: Trigger Execution
+      description: Enqueue a workflow execution. Returns run_id immediately (async).
+      operationId: trigger_execution_api_v1_workflows__workflow_id__trigger_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/TriggerRequest'
       responses:
         '202':
-          description: Execution accepted and queued.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                required: [run_id, status]
-                properties:
-                  run_id:
-                    type: string
-                  status:
-                    type: string
-                    enum: [QUEUED]
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
+                additionalProperties: true
+                title: Response Trigger Execution Api V1 Workflows  Workflow Id  Trigger
+                  Post
         '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-        '429':
-          $ref: '#/components/responses/TooManyRequests'
-
-  /executions:
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions:
     get:
-      operationId: executions_list
-      tags: [Executions]
-      summary: List execution runs for the current tenant
+      tags:
+      - Executions
+      summary: List Executions
+      operationId: list_executions_api_v1_executions_get
+      security:
+      - HTTPBearer: []
       parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-        - name: workflow_id
-          in: query
-          schema:
-            type: string
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [QUEUED, RUNNING, SUCCESS, FAILED, CANCELLED, WAITING_HUMAN]
-        - name: started_after
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - name: started_before
-          in: query
-          schema:
-            type: string
-            format: date-time
-      responses:
-        '200':
-          description: Paginated execution list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ExecutionRun'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /executions/{run_id}:
-    get:
-      operationId: executions_get
-      tags: [Executions]
-      summary: Get execution run status and output
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      responses:
-        '200':
-          description: Execution run detail.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecutionRun'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /executions/{run_id}/cancel:
-    post:
-      operationId: executions_cancel
-      tags: [Executions]
-      summary: Cancel a running or queued execution
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      responses:
-        '200':
-          description: Cancellation accepted.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecutionRun'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-          description: Run is already in a terminal state.
-
-  /executions/{run_id}/retry:
-    post:
-      operationId: executions_retry
-      tags: [Executions]
-      summary: Retry a failed execution (creates a new run)
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      responses:
-        '202':
-          description: New retry execution queued.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  run_id:
-                    type: string
-                  status:
-                    type: string
-                    enum: [QUEUED]
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  # ── Node Executions ───────────────────────────────────────────────────────────
-
-  /executions/{run_id}/nodes:
-    get:
-      operationId: nodes_list
-      tags: [Nodes]
-      summary: List all node execution states for a run
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-      responses:
-        '200':
-          description: Node states for the run.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  run_id:
-                    type: string
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/NodeExecutionState'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /executions/{run_id}/nodes/{node_id}:
-    get:
-      operationId: nodes_get
-      tags: [Nodes]
-      summary: Get a single node execution state
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-        - name: node_id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Node execution state.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NodeExecutionState'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /executions/human-input:
-    post:
-      operationId: executions_human_input
-      tags: [Nodes]
-      summary: Submit human-input response to resume a waiting execution
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/HumanInputSubmit'
-      responses:
-        '200':
-          description: Input accepted. Execution resumed (or rejected).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecutionRun'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  # ── Logs ──────────────────────────────────────────────────────────────────────
-
-  /executions/{run_id}/logs:
-    get:
-      operationId: logs_list
-      tags: [Logs]
-      summary: Fetch structured logs for an execution run
-      parameters:
-        - $ref: '#/components/parameters/RunId'
-        - name: node_id
-          in: query
-          schema:
-            type: string
-          description: Filter logs to a specific node.
-        - name: level
-          in: query
-          schema:
-            type: string
-            enum: [DEBUG, INFO, WARNING, ERROR]
-        - name: since
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-      responses:
-        '200':
-          description: Log entries.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/LogEntry'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Schedules ─────────────────────────────────────────────────────────────────
-
-  /workflows/{workflow_id}/schedules:
-    get:
-      operationId: schedules_list
-      tags: [Schedules]
-      summary: List schedules for a workflow
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      responses:
-        '200':
-          description: Schedule list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Schedule'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    post:
-      operationId: schedules_create
-      tags: [Schedules]
-      summary: Create a cron schedule for a workflow (EDITOR+ required)
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ScheduleCreate'
-      responses:
-        '201':
-          description: Schedule created.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Schedule'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-
-  /workflows/{workflow_id}/schedules/{schedule_id}:
-    get:
-      operationId: schedules_get
-      tags: [Schedules]
-      summary: Get schedule detail
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/ScheduleId'
-      responses:
-        '200':
-          description: Schedule.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Schedule'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    patch:
-      operationId: schedules_update
-      tags: [Schedules]
-      summary: Update schedule configuration
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/ScheduleId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ScheduleCreate'
-      responses:
-        '200':
-          description: Schedule updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Schedule'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: schedules_delete
-      tags: [Schedules]
-      summary: Delete a schedule
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - $ref: '#/components/parameters/ScheduleId'
-      responses:
-        '204':
-          description: Schedule deleted.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Webhooks ──────────────────────────────────────────────────────────────────
-
-  /webhooks:
-    get:
-      operationId: webhooks_list
-      tags: [Webhooks]
-      summary: List outbound webhooks for the tenant
-      responses:
-        '200':
-          description: Webhook list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Webhook'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    post:
-      operationId: webhooks_create
-      tags: [Webhooks]
-      summary: Register a new outbound webhook (OWNER only)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WebhookCreate'
-      responses:
-        '201':
-          description: Webhook registered.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Webhook'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /webhooks/{webhook_id}:
-    get:
-      operationId: webhooks_get
-      tags: [Webhooks]
-      summary: Get webhook detail
-      parameters:
-        - $ref: '#/components/parameters/WebhookId'
-      responses:
-        '200':
-          description: Webhook detail.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Webhook'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    patch:
-      operationId: webhooks_update
-      tags: [Webhooks]
-      summary: Update webhook configuration
-      parameters:
-        - $ref: '#/components/parameters/WebhookId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WebhookCreate'
-      responses:
-        '200':
-          description: Webhook updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Webhook'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-    delete:
-      operationId: webhooks_delete
-      tags: [Webhooks]
-      summary: Delete a webhook (OWNER only)
-      parameters:
-        - $ref: '#/components/parameters/WebhookId'
-      responses:
-        '204':
-          description: Webhook deleted.
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Webhook Inbound (receive external triggers) ────────────────────────────────
-
-  /webhooks/inbound/{workflow_id}:
-    post:
-      operationId: webhooks_inbound_trigger
-      tags: [Webhooks]
-      summary: |
-        Inbound webhook — trigger a workflow from an external system.
-        Authenticated via HMAC-SHA256 signature in X-Webhook-Signature header.
-      security: []
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
-        - name: X-Webhook-Signature
-          in: header
-          required: true
-          schema:
-            type: string
-          description: HMAC-SHA256 of request body, prefixed `sha256=`.
-      requestBody:
+      - name: workflow_id
+        in: query
         required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Workflow Id
+      - name: skip
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Skip
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 100
+          default: 20
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Executions Api V1 Executions Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/{run_id}:
+    get:
+      tags:
+      - Executions
+      summary: Get Execution
+      operationId: get_execution_api_v1_executions__run_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Execution Api V1 Executions  Run Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/{run_id}/cancel:
+    post:
+      tags:
+      - Executions
+      summary: Cancel Execution
+      operationId: cancel_execution_api_v1_executions__run_id__cancel_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Cancel Execution Api V1 Executions  Run Id  Cancel
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/{run_id}/retry:
+    post:
+      tags:
+      - Executions
+      summary: Retry Execution
+      operationId: retry_execution_api_v1_executions__run_id__retry_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Retry Execution Api V1 Executions  Run Id  Retry Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/{run_id}/nodes:
+    get:
+      tags:
+      - Executions
+      summary: List Nodes
+      operationId: list_nodes_api_v1_executions__run_id__nodes_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Nodes Api V1 Executions  Run Id  Nodes Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/human-input:
+    post:
+      tags:
+      - Executions
+      summary: Submit Human Input
+      description: Submit a human approval/response for a paused execution node.
+      operationId: submit_human_input_api_v1_executions_human_input_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
         content:
           application/json:
             schema:
-              type: object
+              $ref: '#/components/schemas/HumanInputRequest'
       responses:
         '202':
-          description: Webhook received and execution queued.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  run_id:
-                    type: string
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ── Audit Log ─────────────────────────────────────────────────────────────────
-
-  /audit:
+                additionalProperties: true
+                title: Response Submit Human Input Api V1 Executions Human Input Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/executions/{run_id}/logs:
     get:
-      operationId: audit_list
-      tags: [Audit]
-      summary: Query tenant audit log (OWNER only — paginated, newest first)
+      tags:
+      - Executions
+      summary: Get Logs
+      operationId: get_logs_api_v1_executions__run_id__logs_get
+      security:
+      - HTTPBearer: []
       parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-        - name: event_type
-          in: query
-          schema:
-            type: string
-          description: Filter by event type (e.g. workflow.published).
-        - name: resource_id
-          in: query
-          schema:
-            type: string
-        - name: user_id
-          in: query
-          schema:
-            type: string
-            format: uuid
-        - name: since
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - name: until
-          in: query
-          schema:
-            type: string
-            format: date-time
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: skip
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Skip
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 1000
+          default: 100
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
-          description: Audit events.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/AuditEvent'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  # ── Usage / Billing ───────────────────────────────────────────────────────────
-
-  /usage:
+                additionalProperties: true
+                title: Response Get Logs Api V1 Executions  Run Id  Logs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/webhooks:
     get:
-      operationId: usage_summary
-      tags: [Usage]
-      summary: Get aggregated usage for the current billing period
+      tags:
+      - Webhooks
+      summary: List Webhooks
+      operationId: list_webhooks_api_v1_webhooks_get
+      security:
+      - HTTPBearer: []
       parameters:
-        - name: period_start
-          in: query
-          schema:
-            type: string
-            format: date-time
-          description: Start of the billing window. Defaults to start of current month.
-        - name: period_end
-          in: query
-          schema:
-            type: string
-            format: date-time
-        - name: granularity
-          in: query
-          schema:
-            type: string
-            enum: [hour, day, month]
-            default: day
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
-          description: Usage summary.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/UsageSummary'
-                  total_cost_usd:
-                    type: number
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  # ── Team Management ──────────────────────────────────────────────────────────
-  # Requires ADMIN or OWNER role for write operations.
-
-  /users:
-    get:
-      operationId: team_list_members
-      tags: [Team]
-      summary: List all team members in the current tenant
-      parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-      responses:
-        '200':
-          description: Team member list.
+                additionalProperties: true
+                title: Response List Webhooks Api V1 Webhooks Get
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/User'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /users/invite:
+                $ref: '#/components/schemas/HTTPValidationError'
     post:
-      operationId: team_invite_member
-      tags: [Team]
-      summary: Invite a user to join the tenant (ADMIN / OWNER only)
+      tags:
+      - Webhooks
+      summary: Create Webhook
+      operationId: create_webhook_api_v1_webhooks_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserInvite'
+              $ref: '#/components/schemas/CreateWebhookRequest'
       responses:
         '201':
-          description: Invitation sent. Returns the pending invite record.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PendingInvite'
-        '409':
-          description: User already a member or pending invite exists.
-          $ref: '#/components/responses/Conflict'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /users/invites:
-    get:
-      operationId: team_list_invites
-      tags: [Team]
-      summary: List pending invitations for the tenant (ADMIN / OWNER only)
-      responses:
-        '200':
-          description: Pending invite list.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/PendingInvite'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /users/invites/{invite_id}:
-    delete:
-      operationId: team_revoke_invite
-      tags: [Team]
-      summary: Revoke a pending invitation (ADMIN / OWNER only)
+                additionalProperties: true
+                title: Response Create Webhook Api V1 Webhooks Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/webhooks/{webhook_id}:
+    get:
+      tags:
+      - Webhooks
+      summary: Get Webhook
+      operationId: get_webhook_api_v1_webhooks__webhook_id__get
+      security:
+      - HTTPBearer: []
       parameters:
-        - name: invite_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
+      - name: webhook_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Webhook Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
-        '204':
-          description: Invite revoked.
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /users/{user_id}:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Webhook Api V1 Webhooks  Webhook Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
     patch:
-      operationId: team_update_member_role
-      tags: [Team]
-      summary: Update a team member's role (ADMIN / OWNER only)
-      description: OWNER role cannot be granted or removed via this endpoint.
+      tags:
+      - Webhooks
+      summary: Update Webhook
+      operationId: update_webhook_api_v1_webhooks__webhook_id__patch
+      security:
+      - HTTPBearer: []
       parameters:
-        - $ref: '#/components/parameters/UserId'
+      - name: webhook_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Webhook Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UserRoleUpdate'
+              $ref: '#/components/schemas/PatchWebhookRequest'
       responses:
         '200':
-          description: Role updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/User'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    delete:
-      operationId: team_remove_member
-      tags: [Team]
-      summary: Remove a user from the tenant (ADMIN / OWNER only)
-      description: Cannot remove the last OWNER. Own account cannot be removed (use account deletion).
-      parameters:
-        - $ref: '#/components/parameters/UserId'
-      responses:
-        '204':
-          description: User removed from tenant.
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          description: Cannot remove the last OWNER.
-          $ref: '#/components/responses/Conflict'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── Global Schedules List ──────────────────────────────────────────────────────
-  # Top-level list for the Schedules page (/schedules).
-  # Per-workflow schedule creation and management remains under /workflows/{id}/schedules.
-
-  /schedules:
-    get:
-      operationId: schedules_list_all
-      tags: [Schedules]
-      summary: List all schedules across all workflows for the current tenant
-      parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/PageSizeParam'
-        - name: is_active
-          in: query
-          schema:
-            type: boolean
-          description: Filter by active/inactive status.
-        - name: workflow_id
-          in: query
-          schema:
-            type: string
-          description: Optionally filter to a single workflow.
-      responses:
-        '200':
-          description: All tenant schedules.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Schedule'
-                  pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /schedules/{schedule_id}:
-    patch:
-      operationId: schedules_update
-      tags: [Schedules]
-      summary: Update a schedule (toggle active, change cron, change timezone)
+                additionalProperties: true
+                title: Response Update Webhook Api V1 Webhooks  Webhook Id  Patch
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - Webhooks
+      summary: Delete Webhook
+      operationId: delete_webhook_api_v1_webhooks__webhook_id__delete
+      security:
+      - HTTPBearer: []
       parameters:
-        - $ref: '#/components/parameters/ScheduleId'
-      requestBody:
+      - name: webhook_id
+        in: path
         required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ScheduleCreate'
+        schema:
+          type: string
+          title: Webhook Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
-        '200':
-          description: Updated schedule.
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Schedule'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-    delete:
-      operationId: schedules_delete
-      tags: [Schedules]
-      summary: Delete a schedule
-      parameters:
-        - $ref: '#/components/parameters/ScheduleId'
-      responses:
-        '204':
-          description: Schedule deleted.
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── Integrations — OAuth Connections ─────────────────────────────────────────
-  # Third-party credential connections used by api_request, mcp, and connector nodes.
-  # OAuth flows redirect to /auth/oauth/{provider} (existing) but are scoped
-  # as integration connections rather than user-login connections.
-
-  /integrations/connections:
-    get:
-      operationId: integrations_list_connections
-      tags: [Integrations]
-      summary: List all OAuth/credential connections for the tenant
-      parameters:
-        - name: provider
-          in: query
-          schema:
-            type: string
-          description: Filter by provider (e.g. slack, github, email).
-        - name: status
-          in: query
-          schema:
-            type: string
-            enum: [active, expired, error]
-      responses:
-        '200':
-          description: Connection list.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/OAuthConnection'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /integrations/connections/{connection_id}:
-    delete:
-      operationId: integrations_revoke_connection
-      tags: [Integrations]
-      summary: Revoke and delete an OAuth connection
-      description: Any nodes referencing this connection will fail at execution time until reconnected.
-      parameters:
-        - $ref: '#/components/parameters/ConnectionId'
-      responses:
-        '204':
-          description: Connection revoked.
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  # ── WebSocket Endpoints ───────────────────────────────────────────────────────
-  # WebSocket paths are not natively described in OpenAPI 3.1 path items.
-  # Full event schemas for both endpoints are documented in:
-  #   docs/frontend/handover.md §5  — Chat WebSocket events
-  #   docs/frontend/overview.md §7  — Execution WebSocket events
-  #
-  # WS /ws/chat/{session_id}
-  #   Server → Client only. Events: token | done | phase_change | workflow_ready
-  #   Auth: Bearer token in query param ?token=<access_token>
-  #
-  # WS /ws/executions/{run_id}
-  #   Server → Client only. Events: RUN_STARTED | RUN_COMPLETED | NODE_STARTED |
-  #   NODE_COMPLETED | NODE_FAILED | NODE_LOG | HUMAN_WAITING | HEARTBEAT
-  #   Auth: Bearer token in query param ?token=<access_token>
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Chat — Conversational DAG Builder
-# ─────────────────────────────────────────────────────────────────────────────
-
-  /chat/sessions:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/webhooks/inbound/{workflow_id}:
     post:
-      operationId: chat_create_session
-      tags: [Chat]
-      summary: Create a new chat session
-      description: |
-        Opens a new conversation session for natural-language workflow building.
-        Returns a session_id to use in subsequent message calls.
+      tags:
+      - Webhooks
+      summary: Inbound Webhook
+      description: Public webhook receiver — no user auth required, validated by HMAC
+        secret.
+      operationId: inbound_webhook_api_v1_webhooks_inbound__workflow_id__post
+      parameters:
+      - name: workflow_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Workflow Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Inbound Webhook Api V1 Webhooks Inbound  Workflow
+                  Id  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/audit:
+    get:
+      tags:
+      - Audit
+      summary: List Audit
+      operationId: list_audit_api_v1_audit_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: skip
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Skip
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          default: 50
+          title: Limit
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Audit Api V1 Audit Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/usage:
+    get:
+      tags:
+      - Usage
+      summary: Get Usage
+      operationId: get_usage_api_v1_usage_get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Usage Api V1 Usage Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/schedules/{schedule_id}:
+    get:
+      tags:
+      - Schedules
+      summary: Get Schedule
+      operationId: get_schedule_api_v1_schedules__schedule_id__get
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Schedule Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Schedule Api V1 Schedules  Schedule Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    patch:
+      tags:
+      - Schedules
+      summary: Update Schedule
+      operationId: update_schedule_api_v1_schedules__schedule_id__patch
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Schedule Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
-              properties:
-                title:
-                  type: string
-                  description: Optional human-readable session title.
-                  maxLength: 120
+              additionalProperties: true
+              title: Body
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Update Schedule Api V1 Schedules  Schedule Id  Patch
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - Schedules
+      summary: Delete Schedule
+      operationId: delete_schedule_api_v1_schedules__schedule_id__delete
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Schedule Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/chat/sessions:
+    post:
+      tags:
+      - Chat
+      summary: Create Session
+      description: Create a new chat session.
+      operationId: create_session_api_v1_chat_sessions_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '201':
-          description: Session created.
+          description: Successful Response
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ChatSession'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
     get:
-      operationId: chat_list_sessions
-      tags: [Chat]
-      summary: List all chat sessions for the current tenant
+      tags:
+      - Chat
+      summary: List Sessions
+      description: List tenant sessions.
+      operationId: list_sessions_api_v1_chat_sessions_get
+      security:
+      - HTTPBearer: []
       parameters:
-        - name: limit
-          in: query
-          schema: { type: integer, default: 20, maximum: 100 }
-        - name: offset
-          in: query
-          schema: { type: integer, default: 0 }
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       responses:
         '200':
-          description: Session list.
+          description: Successful Response
           content:
             application/json:
               schema:
                 type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ChatSession'
-                  total: { type: integer }
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /chat/sessions/{session_id}:
-    get:
-      operationId: chat_get_session
-      tags: [Chat]
-      summary: Get full session including message history and extracted requirement spec
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: Full session detail.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChatSessionDetail'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /chat/sessions/{session_id}/message:
-    post:
-      operationId: chat_send_message
-      tags: [Chat]
-      summary: Send a message and receive an AI reply with optional DAG preview
-      description: |
-        Core chat endpoint. The system automatically advances through phases:
-        GATHERING -> CLARIFYING -> FINALIZING -> GENERATING -> COMPLETE.
-        When requirements are fully gathered, workflow_preview is populated.
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [content]
-              properties:
-                content:
-                  type: string
-                  description: User message text.
-                  maxLength: 4096
-      responses:
-        '200':
-          description: AI reply with current conversation state.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChatMessageResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '409':
-          description: Session already in COMPLETE phase.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
-
-  /chat/sessions/{session_id}/generate:
-    post:
-      operationId: chat_force_generate
-      tags: [Chat]
-      summary: Force DAG generation with currently extracted requirements
-      description: |
-        Skips remaining clarification rounds and generates the workflow
-        using best-effort defaults for unspecified optional fields.
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: Generated workflow definition.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChatMessageResponse'
+                additionalProperties: true
+                title: Response List Sessions Api V1 Chat Sessions Get
         '422':
-          description: Minimum requirements (goal + trigger) not yet captured.
+          description: Validation Error
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /chat/sessions/{session_id}/workflow:
-    put:
-      operationId: chat_update_workflow
-      tags: [Chat]
-      summary: Submit frontend workflow edits — validates DAG and returns suggestions
-      description: |
-        Called when the user modifies nodes or edges in the DAG preview canvas.
-        Runs cycle detection + port compatibility check. On success, persists the
-        updated WorkflowDefinition and returns optional AI improvement suggestions.
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/chat/sessions/{session_id}:
+    get:
+      tags:
+      - Chat
+      summary: Get Session
+      description: Full session + history.
+      operationId: get_session_api_v1_chat_sessions__session_id__get
+      security:
+      - HTTPBearer: []
       parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema: { type: string }
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatSession'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/chat/sessions/{session_id}/message:
+    post:
+      tags:
+      - Chat
+      summary: Send Message
+      description: Send message, get reply.
+      operationId: send_message_api_v1_chat_sessions__session_id__message_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/WorkflowUpdateRequest'
+              $ref: '#/components/schemas/CreateMessageRequest'
       responses:
         '200':
-          description: Validation result with updated workflow and optional suggestions.
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WorkflowUpdateResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
+                type: object
+                additionalProperties: true
+                title: Response Send Message Api V1 Chat Sessions  Session Id  Message
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/chat/sessions/{session_id}/generate:
+    post:
+      tags:
+      - Chat
+      summary: Force Generate
+      description: Force DAG generation (EDITOR role).
+      operationId: force_generate_api_v1_chat_sessions__session_id__generate_post
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Force Generate Api V1 Chat Sessions  Session Id  Generate
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/chat/sessions/{session_id}/workflow:
+    put:
+      tags:
+      - Chat
+      summary: Submit Workflow Edits
+      description: Submit workflow edits.
+      operationId: submit_workflow_edits_api_v1_chat_sessions__session_id__workflow_put
+      security:
+      - HTTPBearer: []
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: X-API-Key
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Api-Key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkflowRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Submit Workflow Edits Api V1 Chat Sessions  Session
+                  Id  Workflow Put
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    ChatMessage:
+      properties:
+        id:
+          type: string
+          title: Id
+        role:
+          type: string
+          enum:
+          - user
+          - assistant
+          title: Role
+        content:
+          type: string
+          title: Content
+        ts:
+          type: string
+          format: date-time
+          title: Ts
+      type: object
+      required:
+      - id
+      - role
+      - content
+      - ts
+      title: ChatMessage
+    ChatSession:
+      properties:
+        session_id:
+          type: string
+          title: Session Id
+        tenant_id:
+          type: string
+          title: Tenant Id
+        user_id:
+          type: string
+          title: User Id
+        phase:
+          $ref: '#/components/schemas/ConversationPhase'
+        messages:
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+          type: array
+          title: Messages
+        requirement_spec:
+          anyOf:
+          - $ref: '#/components/schemas/RequirementSpec'
+          - type: 'null'
+        generated_workflow_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Generated Workflow Id
+        clarification_round:
+          type: integer
+          title: Clarification Round
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - session_id
+      - tenant_id
+      - user_id
+      - phase
+      - messages
+      - requirement_spec
+      - generated_workflow_id
+      - clarification_round
+      - created_at
+      - updated_at
+      title: ChatSession
+    ConversationPhase:
+      type: string
+      enum:
+      - GATHERING
+      - CLARIFYING
+      - FINALIZING
+      - GENERATING
+      - COMPLETE
+      title: ConversationPhase
+    CreateAPIKeyRequest:
+      properties:
+        name:
+          type: string
+          title: Name
+        scopes:
+          items:
+            type: string
+          type: array
+          title: Scopes
+          default:
+          - workflows:read
+          - workflows:write
+        expires_in_days:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Expires In Days
+      type: object
+      required:
+      - name
+      title: CreateAPIKeyRequest
+    CreateMessageRequest:
+      properties:
+        content:
+          type: string
+          title: Content
+      type: object
+      required:
+      - content
+      title: CreateMessageRequest
+    CreateWebhookRequest:
+      properties:
+        workflow_id:
+          type: string
+          title: Workflow Id
+        name:
+          type: string
+          title: Name
+        events:
+          items:
+            type: string
+          type: array
+          title: Events
+          default:
+          - execution.completed
+        secret:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Secret
+      type: object
+      required:
+      - workflow_id
+      - name
+      title: CreateWebhookRequest
+    CreateWorkflowRequest:
+      properties:
+        name:
+          type: string
+          title: Name
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        definition:
+          additionalProperties: true
+          type: object
+          title: Definition
+          default: {}
+      type: object
+      required:
+      - name
+      title: CreateWorkflowRequest
+    EdgeDefinition:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Unique identifier for the edge
+        source_node:
+          type: string
+          title: Source Node
+          description: Source node ID
+        target_node:
+          type: string
+          title: Target Node
+          description: Target node ID
+        source_port:
+          type: string
+          title: Source Port
+          description: Output port on the source node
+          default: default
+        target_port:
+          type: string
+          title: Target Port
+          description: Input port on the target node
+          default: default
+      type: object
+      required:
+      - id
+      - source_node
+      - target_node
+      title: EdgeDefinition
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HumanInputRequest:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        node_id:
+          type: string
+          title: Node Id
+        response:
+          additionalProperties: true
+          type: object
+          title: Response
+      type: object
+      required:
+      - run_id
+      - node_id
+      - response
+      title: HumanInputRequest
+    LoginRequest:
+      properties:
+        email:
+          type: string
+          title: Email
+        password:
+          type: string
+          title: Password
+      type: object
+      required:
+      - email
+      - password
+      title: LoginRequest
+    MFAVerifyRequest:
+      properties:
+        code:
+          type: string
+          title: Code
+      type: object
+      required:
+      - code
+      title: MFAVerifyRequest
+    NodeDefinition:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Unique identifier for the node
+        type:
+          type: string
+          title: Type
+          description: Type of the node (e.g., LLMNode, TransformNode)
+        config:
+          additionalProperties: true
+          type: object
+          title: Config
+          description: Configuration parameters for the node
+        position:
+          additionalProperties:
+            type: number
+          type: object
+          title: Position
+          description: X/Y coordinates for the canvas
+      type: object
+      required:
+      - id
+      - type
+      title: NodeDefinition
+    PasswordChangeRequest:
+      properties:
+        token:
+          type: string
+          title: Token
+        new_password:
+          type: string
+          title: New Password
+      type: object
+      required:
+      - token
+      - new_password
+      title: PasswordChangeRequest
+    PasswordResetRequest:
+      properties:
+        email:
+          type: string
+          title: Email
+      type: object
+      required:
+      - email
+      title: PasswordResetRequest
+    PatchUserRequest:
+      properties:
+        full_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Full Name
+        avatar_url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Avatar Url
+      type: object
+      title: PatchUserRequest
+    PatchWebhookRequest:
+      properties:
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        events:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Events
+        active:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Active
+      type: object
+      title: PatchWebhookRequest
+    PatchWorkflowRequest:
+      properties:
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+        definition:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Definition
+      type: object
+      title: PatchWorkflowRequest
+    ProcessingStep:
+      properties:
+        description:
+          type: string
+          title: Description
+        suggested_node_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Suggested Node Type
+        config_hints:
+          additionalProperties: true
+          type: object
+          title: Config Hints
+      type: object
+      required:
+      - description
+      title: ProcessingStep
+    RegisterRequest:
+      properties:
+        email:
+          type: string
+          title: Email
+        password:
+          type: string
+          title: Password
+        full_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Full Name
+      type: object
+      required:
+      - email
+      - password
+      title: RegisterRequest
+    RequirementSpec:
+      properties:
+        goal:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Goal
+        trigger_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trigger Type
+        trigger_config:
+          additionalProperties: true
+          type: object
+          title: Trigger Config
+        input_sources:
+          items:
+            type: string
+          type: array
+          title: Input Sources
+        processing_steps:
+          items:
+            $ref: '#/components/schemas/ProcessingStep'
+          type: array
+          title: Processing Steps
+        integrations:
+          items:
+            type: string
+          type: array
+          title: Integrations
+        output_format:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Format
+        constraints:
+          additionalProperties: true
+          type: object
+          title: Constraints
+      type: object
+      title: RequirementSpec
+    TokenRefreshRequest:
+      properties:
+        refresh_token:
+          type: string
+          title: Refresh Token
+      type: object
+      required:
+      - refresh_token
+      title: TokenRefreshRequest
+    TriggerRequest:
+      properties:
+        input_data:
+          additionalProperties: true
+          type: object
+          title: Input Data
+          default: {}
+        triggered_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Triggered By
+      type: object
+      title: TriggerRequest
+    UpdateWorkflowRequest:
+      properties:
+        workflow:
+          $ref: '#/components/schemas/WorkflowDefinition'
+      type: object
+      required:
+      - workflow
+      title: UpdateWorkflowRequest
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    WorkflowDefinition:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Unique identifier for the workflow
+        name:
+          type: string
+          title: Name
+          description: Name of the workflow
+          default: Untitled Workflow
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Description
+          description: Human-readable description
+        nodes:
+          additionalProperties:
+            $ref: '#/components/schemas/NodeDefinition'
+          type: object
+          title: Nodes
+          description: Map of node ID to NodeDefinition
+        edges:
+          items:
+            $ref: '#/components/schemas/EdgeDefinition'
+          type: array
+          title: Edges
+          description: List of edges connecting the nodes
+        ui_metadata:
+          additionalProperties: true
+          type: object
+          title: Ui Metadata
+          description: Frontend canvas layout states
+      type: object
+      required:
+      - id
+      title: WorkflowDefinition
+  securitySchemes:
+    HTTPBearer:
+      type: http
+      scheme: bearer
+

@@ -37,7 +37,7 @@ class MongoExecutionRepository(ExecutionRepository):
 
     async def create(self, tenant_id: str, execution: ExecutionRun) -> ExecutionRun:
         """Insert a new pending or queued execution run."""
-        data = execution.model_dump(mode="json")
+        data = execution.model_dump()  # keep datetime as native objects — MongoDB needs BSON dates not ISO strings
         data["tenant_id"] = tenant_id
         
         try:
@@ -53,7 +53,7 @@ class MongoExecutionRepository(ExecutionRepository):
         In production, a finer-grained `$set` operator method could be used,
         but `ExecutionEngine` state machine design passes the entire modified Run.
         """
-        data = execution.model_dump(mode="json")
+        data = execution.model_dump()  # keep datetime as native objects — MongoDB needs BSON dates not ISO strings
         data["tenant_id"] = tenant_id
         
         await self._collection.replace_one(

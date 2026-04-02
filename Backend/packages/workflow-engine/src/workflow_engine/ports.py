@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import builtins
 from typing import Any, TYPE_CHECKING
@@ -109,6 +111,14 @@ class CachePort(abc.ABC):
     async def delete(self, key: str) -> None:
         pass
 
+    async def smembers(self, key: str) -> set[str]:
+        """Return all members of a Redis set. Default: empty set (non-Redis caches)."""
+        return set()
+
+    async def sadd(self, key: str, *members: str, ttl_seconds: int | None = None) -> None:
+        """Add members to a Redis set. Default: no-op (non-Redis caches)."""
+        pass
+
 class StoragePort(abc.ABC):
     @abc.abstractmethod
     async def upload(self, tenant_id: str, path: str, data: bytes) -> str:
@@ -136,6 +146,24 @@ class LLMPort(abc.ABC):
     @abc.abstractmethod
     async def embed(self, text: str, **kwargs: Any) -> list[float]:
         pass
+
+    async def complete_with_usage(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        """
+        Return completion with native token usage metadata.
+
+        Returns:
+            {
+                "text": str,           — the completion text
+                "input_tokens": int,   — prompt token count
+                "output_tokens": int,  — completion token count
+                "thoughts_tokens": int — reasoning/thought tokens (Gemini only, 0 otherwise)
+            }
+
+        Default implementation wraps complete() with zero token counts.
+        Override in concrete providers for native counting.
+        """
+        text = await self.complete(prompt, **kwargs)
+        return {"text": text, "input_tokens": 0, "output_tokens": 0, "thoughts_tokens": 0}
 
 
 class BillingRepository(abc.ABC):

@@ -37,21 +37,23 @@ class MongoScheduleRepository(ScheduleRepository):
 
     async def create(self, tenant_id: str, schedule: ScheduleModel) -> ScheduleModel:
         """Create a new schedule."""
-        data = schedule.model_dump(mode="json")
+        # Use model_dump() (not mode="json") so datetime objects are stored as BSON
+        # dates, which enables correct $lte date comparisons in get_due_schedules.
+        data = schedule.model_dump()
         data["tenant_id"] = tenant_id
-        
+
         try:
             await self._collection.insert_one(data)
         except DuplicateKeyError as exc:
             raise ValueError(f"Schedule ID '{schedule.schedule_id}' already exists.") from exc
-            
+
         return schedule
 
     async def update(self, tenant_id: str, schedule_id: str, schedule: ScheduleModel) -> ScheduleModel:
         """Update an existing schedule (useful for recording next fire time)."""
-        data = schedule.model_dump(mode="json")
+        data = schedule.model_dump()
         data["tenant_id"] = tenant_id
-        
+
         await self._collection.replace_one(
             {"tenant_id": tenant_id, "schedule_id": schedule_id},
             data,
@@ -64,10 +66,12 @@ class MongoScheduleRepository(ScheduleRepository):
         Global query (across all tenants) to pull due heartbeat triggers.
         The worker daemon iterates over these to dispatch jobs.
         """
+        from datetime import datetime, timezone
+        now_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         # Active equals True AND next_fire_at is less than or equal to current tick
         query = {
             "is_active": True,
-            "next_fire_at": {"$lte": timestamp}
+            "next_fire_at": {"$lte": now_dt}
         }
         
         cursor = self._collection.find(query)

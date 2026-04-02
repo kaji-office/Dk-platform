@@ -47,8 +47,11 @@ class ContextManager:
         
         for edge in edges:
             source_data = run_state_outputs.get(edge.source_node, {})
-            # Look at specific port if stated, else merge all outputs
-            value = source_data.get(edge.source_port) if edge.source_port else source_data
+            # "default" is a sentinel meaning "all outputs"; treat it same as unspecified port
+            if edge.source_port and edge.source_port != "default":
+                value = source_data.get(edge.source_port)
+            else:
+                value = source_data
             
             # De-reference blobs
             if isinstance(value, dict) and "__blob" in value and self.storage:

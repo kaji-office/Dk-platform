@@ -171,7 +171,7 @@ export interface RequirementSpec {
 export interface ChatMessageResponse {
   session_id: string
   phase: ConversationPhase
-  reply: string
+  message: string              // assistant text — field is "message", NOT "reply"
   clarification: ClarificationBlock | null
   requirement_spec: RequirementSpec | null
   workflow_preview: WorkflowDefinition | null
@@ -187,12 +187,19 @@ export interface ChatSession {
   updated_at: string
 }
 
-// WebSocket events from /ws/chat/{session_id}
+// Client → Server
+export interface ChatWsClientMessage {
+  type: 'message'
+  content: string
+}
+
+// Server → Client events from WS /api/v1/chat/sessions/ws/chat/{session_id}
+// Auth: ?token=<access_token>  (JWT in query param — browsers can't set WS headers)
+// Rich payload (clarification, WorkflowDefinition) always comes from REST, not WS.
 export type ChatWsEvent =
-  | { type: 'token'; content: string }
-  | { type: 'done'; phase: ConversationPhase; full_response: ChatMessageResponse }
-  | { type: 'phase_change'; from: ConversationPhase; to: ConversationPhase }
-  | { type: 'workflow_ready'; workflow_id: string; workflow_preview: WorkflowDefinition }
+  | { type: 'status';   phase: 'PROCESSING' }
+  | { type: 'phase';    phase: 'CLARIFYING' | 'GENERATING' }
+  | { type: 'response'; phase: 'COMPLETE'; message: string; workflow_id: string | null }
 ```
 
 ---
@@ -291,7 +298,7 @@ export const useChatStore = create<ChatStore>()(
             {
               id: `msg_${Date.now()}`,
               role: 'assistant',
-              content: response.reply,
+              content: response.message,
               ts: new Date().toISOString(),
             },
           ],
@@ -394,13 +401,9 @@ export const useForceGenerate = (sessionId: string) =>
 
 export const useUpdateChatWorkflow = (sessionId: string) =>
   useMutation({
-    mutationFn: (payload: {
-      updated_nodes: Record<string, unknown>
-      updated_edges: unknown[]
-      ui_metadata: unknown
-    }) =>
+    mutationFn: (workflow: WorkflowDefinition) =>
       apiClient
-        .put(`/chat/sessions/${sessionId}/workflow`, payload)
+        .put(`/chat/sessions/${sessionId}/workflow`, { workflow })
         .then((r) => r.data),
   })
 ```
@@ -422,42 +425,42 @@ export function useChatWebSocket(sessionId: string | null) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>()
 
   const {
-    appendStreamToken,
-    commitStreamedMessage,
-    applyPhaseChange,
+    setIsStreaming,
+    setPhase,
     applyWorkflowReady,
   } = useChatStore()
 
-  const { loadFromDefinition } = useWorkflowStore()
+  const queryClient = useQueryClient()
 
   const connect = useCallback(() => {
     if (!sessionId) return
-    const url = `${process.env.NEXT_PUBLIC_WS_URL}/ws/chat/${sessionId}`
+    // Auth via query param — browsers cannot set Authorization headers on WebSocket
+    const token = useAuthStore.getState().accessToken
+    const url = `${process.env.NEXT_PUBLIC_WS_URL}/api/v1/chat/sessions/ws/chat/${sessionId}?token=${token}`
     ws.current = new WebSocket(url)
 
     ws.current.onmessage = (ev) => {
       const event: ChatWsEvent = JSON.parse(ev.data)
 
       switch (event.type) {
-        case 'token':
-          appendStreamToken(event.content)
+        case 'status':
+          // Orchestrator started — show typing indicator
+          setIsStreaming(true)
           break
 
-        case 'done':
-          commitStreamedMessage(event.full_response)
-          // If workflow was generated, load it into the canvas store
-          if (event.full_response.workflow_preview) {
-            loadFromDefinition(event.full_response.workflow_preview)
+        case 'phase':
+          // Phase transition (CLARIFYING or GENERATING)
+          setPhase(event.phase)
+          break
+
+        case 'response':
+          // Processing complete — fetch full session data from REST to get
+          // clarification questions, WorkflowDefinition, RequirementSpec, etc.
+          setIsStreaming(false)
+          queryClient.invalidateQueries({ queryKey: ['chat-session', sessionId] })
+          if (event.workflow_id) {
+            applyWorkflowReady(event.workflow_id, null)
           }
-          break
-
-        case 'phase_change':
-          applyPhaseChange(event.from, event.to)
-          break
-
-        case 'workflow_ready':
-          applyWorkflowReady(event.workflow_id, event.workflow_preview)
-          loadFromDefinition(event.workflow_preview)
           break
       }
     }

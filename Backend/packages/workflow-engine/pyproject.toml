@@ -17,7 +17,7 @@ dependencies = [
 
     # Databases
     "motor>=3.4,<4",               # Async MongoDB
-    "aioredis>=2.0,<3",            # Async Redis
+    "redis[asyncio]>=5.0,<6",      # redis.asyncio replaces aioredis (Python 3.12 compat)
     "asyncpg>=0.29,<1",            # Async PostgreSQL
     "pgvector>=0.3,<1",            # pgvector extension
 
@@ -46,19 +46,24 @@ dependencies = [
     # MCP
     "mcp>=1.0",
 
-    # Templating & Validation
+    # Templating, Validation & Data Query
     "jinja2>=3.1,<4",
     "jsonschema>=4.22,<5",
+    "jmespath>=1.0,<2",             # JSONPath queries in ControlFlowNode (LOOP/BRANCH)
 
     # Scheduling
     "croniter>=2.0,<3",
+    "pytz>=2024.1",                 # Timezone-aware cron evaluation (cron_utils.py)
 
-    # Token counting
+    # Token counting — native APIs used (Google: usage_metadata, OpenAI: response.usage)
+    # tiktoken kept as fallback for providers without native counting support
     "tiktoken>=0.7,<1",
 
     # Observability
     "opentelemetry-sdk>=1.24,<2",
     "opentelemetry-instrumentation-httpx>=0.45b0",
+    "prometheus-client>=0.20,<1",   # Metrics (observability/metrics.py)
+    "python-json-logger>=3.0,<4",   # Structured JSON logging (observability/logging.py)
 ]
 
 [project.optional-dependencies]

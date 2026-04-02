@@ -332,7 +332,7 @@ useAutoSave hook: debounce 2000ms
          │
          ▼
 saveStatus = 'saving'
-PUT /api/v2/workflows/{id} { definition }
+PUT /api/v1/workflows/{id} { name?: string, description?: string, definition?: WorkflowDefinition }
          │
     ┌────┴────┐
   success   failure
