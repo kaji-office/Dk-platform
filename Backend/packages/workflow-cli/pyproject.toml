@@ -18,7 +18,7 @@ dependencies = [
 
     # HTTP client (API calls)
     "httpx>=0.27,<1",
-    "websockets>=12.0,<13",        # wf logs — WS streaming
+    "websockets>=12.0,<17",        # wf logs — WS streaming
 
     # Config
     "tomli>=2.0,<3",               # ~/.workflow/config.toml
