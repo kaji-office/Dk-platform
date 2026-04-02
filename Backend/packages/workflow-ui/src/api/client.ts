@@ -6,7 +6,7 @@
 //   - Refresh token (7 days): HttpOnly cookie — invisible to JS, sent automatically
 //   - On 401: interceptor calls POST /auth/token/refresh → retries original request
 //   - On 429: shows toast and does NOT auto-retry (per handover doc §12)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────--
 
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 

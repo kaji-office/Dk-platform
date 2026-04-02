@@ -7,7 +7,7 @@
 //  2. POST /chat/sessions/{id}/message → send user message → phase + assistant reply
 //  3. GET  /chat/sessions/{id}         → fetch full state (called after WS "response" event)
 //  4. PUT  /chat/sessions/{id}/workflow → validate canvas edits against backend
-// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────--
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
