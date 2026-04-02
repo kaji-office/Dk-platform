@@ -182,7 +182,7 @@ class PlatformAuthService:
                 f"<p>This link expires in 24 hours.</p>",
             )
 
-        return {"id": user_id, "email": email}
+        return {"id": user_id, "email": email, "tenant_id": tenant_id}
 
     async def login(self, email: str, password: str) -> dict:
         row = await self._users._pool.fetchrow(
@@ -197,7 +197,11 @@ class PlatformAuthService:
             str(row["id"]), str(row["tenant_id"]), [Role(row["role"])]
         )
         refresh = self._jwt.issue_refresh_token(str(row["id"]))
-        return {"access_token": access, "refresh_token": refresh, "token_type": "bearer", "expires_in": 900}
+        return {
+            "access_token": access, "refresh_token": refresh,
+            "token_type": "bearer", "expires_in": 900,
+            "user_id": str(row["id"]), "tenant_id": str(row["tenant_id"]),
+        }
 
     async def logout(self, token: str) -> None:
         # Stateless JWT v1 — tokens expire naturally (15 min).

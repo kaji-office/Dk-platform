@@ -49,7 +49,7 @@ async def register(body: RegisterRequest, request: Request) -> dict:
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
     await request.app.state.audit_service.write(
-        tenant_id="system", event_type="auth.register", user_id=user["id"],
+        tenant_id=user["tenant_id"], event_type="auth.register", user_id=user["id"],
         resource_type="user", resource_id=user["id"],
         detail={"email": body.email},
     )
@@ -65,8 +65,8 @@ async def login(body: LoginRequest, request: Request) -> dict:
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": str(exc)})
     await request.app.state.audit_service.write(
-        tenant_id="system", event_type="auth.login", user_id=None,
-        resource_type="user", resource_id=None,
+        tenant_id=tokens["tenant_id"], event_type="auth.login", user_id=tokens["user_id"],
+        resource_type="user", resource_id=tokens["user_id"],
         detail={"email": body.email},
     )
     return tokens  # {"access_token", "refresh_token", "expires_in"}

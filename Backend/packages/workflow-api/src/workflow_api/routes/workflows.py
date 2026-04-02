@@ -46,10 +46,12 @@ async def create_workflow(
     result = await svc.create(tenant_id, body.model_dump())
     await request.app.state.audit_service.write(
         tenant_id=tenant_id, event_type="workflow.created", user_id=user["id"],
-        resource_type="workflow", resource_id=result.get("workflow_id"),
+        resource_type="workflow", resource_id=result.get("id") or result.get("workflow_id"),
         detail={"name": body.name},
     )
     return result
+
+
 
 
 @router.get("/{workflow_id}")
