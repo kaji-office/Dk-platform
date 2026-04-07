@@ -322,7 +322,7 @@ Response
 
 #### 3.1.4 Scalability
 - Stateless instances — all state in Redis/MongoDB
-- Connection pooling: motor pool_size=20, asyncpg min=5 max=20, aioredis pool=10
+- Connection pooling: motor pool_size=20, asyncpg min=5 max=20, redis[asyncio] pool=10
 - HPA: min=2, max=10, scale on CPU>70%
 - WebSocket fan-out: multiple API instances all subscribe to same Redis channel
 

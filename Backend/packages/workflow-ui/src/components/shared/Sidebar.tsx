@@ -17,17 +17,19 @@ import {
   ChevronRight,
   Webhook,
   LayoutDashboard,
+  MessageSquarePlus,
 } from 'lucide-react'
 import { useUIStore } from '@/stores/uiStore'
 
 const NAV_ITEMS = [
-  { label: 'Dashboard',  href: '/',             icon: LayoutDashboard },
-  { label: 'Workflows',  href: '/workflows',    icon: Workflow },
-  { label: 'Runs',       href: '/runs',         icon: Play },
-  { label: 'Schedules',  href: '/schedules',    icon: Calendar },
-  { label: 'Webhooks',   href: '/settings/integrations', icon: Webhook },
-  { label: 'Logs',       href: '/logs',         icon: ScrollText },
-  { label: 'Settings',   href: '/settings/profile', icon: Settings },
+  { label: 'Dashboard',    href: '/',                     icon: LayoutDashboard },
+  { label: 'Workflows',    href: '/workflows',            icon: Workflow },
+  { label: 'New with AI',  href: '/workflows/new',        icon: MessageSquarePlus },
+  { label: 'Runs',         href: '/runs',                 icon: Play },
+  { label: 'Schedules',    href: '/schedules',            icon: Calendar },
+  { label: 'Webhooks',     href: '/settings/integrations', icon: Webhook },
+  { label: 'Logs',         href: '/logs',                 icon: ScrollText },
+  { label: 'Settings',     href: '/settings/profile',     icon: Settings },
 ]
 
 export function Sidebar() {

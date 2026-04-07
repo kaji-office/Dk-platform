@@ -33,6 +33,7 @@ export function ChatPanel() {
 
   const createSession = useCreateChatSession()
   // Send message hook — only usable once sessionId is known
+  // Hook is always called (rules of hooks), but mutation is disabled when no session
   const sendMsgMutation = useSendMessage(sessionId ?? '')
 
   // After WS "response" event: fetch full REST payload to get clarification/workflow

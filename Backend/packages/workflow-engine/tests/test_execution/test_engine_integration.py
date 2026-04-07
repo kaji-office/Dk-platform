@@ -182,9 +182,11 @@ async def test_orchestrator_cancel_and_resume():
     run.status = RunStatus.WAITING_HUMAN
     await repo.update_state("t1", "r1", run)
     
-    await orchestrator.resume("t1", "r1", "n1", {"approved": True})
+    minimal_wf = WorkflowDefinition(id="w1", nodes={}, edges=[])
+    await orchestrator.resume("t1", "r1", "n1", minimal_wf, {"approved": True})
     run = await repo.get("t1", "r1")
-    assert run.status == RunStatus.RUNNING
+    # No descendants from n1 → resume completes workflow as SUCCESS
+    assert run.status in (RunStatus.RUNNING, RunStatus.SUCCESS)
     assert run.node_states["n1"].outputs == {"approved": True}
 
 @pytest.mark.asyncio
@@ -193,8 +195,9 @@ async def test_orchestrator_resume_invalid():
     await repo.create("t1", ExecutionRun(run_id="r1", workflow_id="w1", tenant_id="t1", status=RunStatus.RUNNING))
     orchestrator = RunOrchestrator(repo, NodeServices(), TenantConfig(tenant_id="t1"))
     
+    minimal_wf = WorkflowDefinition(id="w1", nodes={}, edges=[])
     with pytest.raises(NodeExecutionError, match="not waiting for human input"):
-        await orchestrator.resume("t1", "r1", "n1", {})
+        await orchestrator.resume("t1", "r1", "n1", minimal_wf, {})
 
 @pytest.mark.asyncio
 async def test_get_node_def_missing():

@@ -28,6 +28,12 @@ class MongoWorkflowRepository(WorkflowRepository):
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._collection = db["workflow_definitions"]
 
+    async def initialize_indexes(self) -> None:
+        """Create indexes on first startup. Safe to call multiple times (idempotent)."""
+        await self._collection.create_index(
+            [("tenant_id", 1), ("id", 1)], unique=True, name="idx_workflow_tenant_id"
+        )
+
     async def get(self, tenant_id: str, workflow_id: str) -> WorkflowDefinition | None:
         """Fetch a workflow by ID, ensuring it belongs to the tenant."""
         doc = await self._collection.find_one({"tenant_id": tenant_id, "id": workflow_id})

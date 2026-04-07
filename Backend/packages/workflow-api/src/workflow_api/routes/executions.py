@@ -1,6 +1,7 @@
 """Execution routes — trigger, list, get, cancel, retry, logs, nodes, human-input."""
 from __future__ import annotations
-from fastapi import APIRouter, Request, status, Query, HTTPException
+import json as _json
+from fastapi import APIRouter, Header, Request, status, Query, HTTPException
 from pydantic import BaseModel
 from workflow_api.dependencies import CurrentUser, TenantId, RequireWrite
 
@@ -28,16 +29,44 @@ async def trigger_execution(
     tenant_id: TenantId,
     request: Request,
     _: dict = RequireWrite,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
-    """Enqueue a workflow execution. Returns run_id immediately (async)."""
+    """Enqueue a workflow execution. Returns run_id immediately (async).
+
+    Supply `Idempotency-Key: <uuid>` to prevent duplicate runs on network retries.
+    A matching key returns the original run within 24 hours.
+    """
+    # Idempotency check — serve cached result if key already seen
+    if idempotency_key:
+        redis = getattr(request.app.state, "redis_client", None)
+        if redis:
+            cache_key = f"idempotent:{tenant_id}:{idempotency_key}"
+            try:
+                cached = await redis.get(cache_key)
+                if cached:
+                    return _json.loads(cached)
+            except Exception:
+                pass  # Redis unavailable — fall through, accept the risk of duplication
+
     svc = request.app.state.execution_service
     run = await svc.trigger(tenant_id, workflow_id, body.input_data, triggered_by=user["id"])
+    result = {"run_id": run["run_id"], "status": "queued"}
+
+    # Cache under idempotency key for 24 hours
+    if idempotency_key:
+        redis = getattr(request.app.state, "redis_client", None)
+        if redis:
+            try:
+                await redis.setex(cache_key, 86400, _json.dumps(result))
+            except Exception:
+                pass
+
     await request.app.state.audit_service.write(
         tenant_id=tenant_id, event_type="execution.triggered", user_id=user["id"],
         resource_type="execution", resource_id=run["run_id"],
         detail={"workflow_id": workflow_id},
     )
-    return {"run_id": run["run_id"], "status": "queued"}
+    return result
 
 
 # ── List / Get ────────────────────────────────────────────────────────────────

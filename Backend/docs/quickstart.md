@@ -190,7 +190,7 @@ make run-scheduler
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"healthy","version":"1.0.0","checks":{"postgres":"ok","mongodb":"ok","redis":"ok"}}
+# {"status":"ok","service":"workflow-api"}
 ```
 
 Open **http://localhost:8000/docs** for the interactive API explorer.
@@ -401,8 +401,14 @@ celery -A workflow_worker.celery_app beat \
 
 ```bash
 curl http://localhost:8000/health
-# {"status":"healthy","version":"1.0.0","checks":{"postgres":"ok","mongodb":"ok","redis":"ok"}}
+# {"status":"ok","service":"workflow-api"}
 ```
+
+> **Env vars for native path:** The API and worker read env vars from the process environment. Source `.env` before starting each service:
+> ```bash
+> set -a && source .env && set +a
+> uvicorn workflow_api.main:app --host 0.0.0.0 --port 8000
+> ```
 
 ---
 
@@ -415,22 +421,33 @@ curl -s -X POST http://localhost:8000/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{
     "email": "admin@example.com",
-    "password": "password123",
-    "name": "Admin User",
-    "tenant_name": "My Company"
+    "password": "Admin@Password123",
+    "full_name": "Admin User"
   }' | python3 -m json.tool
+# Response: {"success": true, "data": {"user_id": "...", "email": "admin@example.com"}}
 ```
 
-Copy the `access_token` from the response.
+Then login to get a token:
+
+```bash
+LOGIN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@example.com", "password": "Admin@Password123"}')
+TOKEN=$(echo $LOGIN | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['access_token'])")
+TENANT=$(echo $LOGIN | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['tenant_id'])")
+```
+
+> Password must be ≥12 characters with uppercase, lowercase, digit, and special character.
 
 ### Create and trigger a workflow
 
-```bash
-TOKEN="<paste access_token>"
+> Both `Authorization: Bearer $TOKEN` and `X-Tenant-ID: $TENANT` headers are required for all protected routes.
 
+```bash
 # Create workflow
-curl -s -X POST http://localhost:8000/api/v1/workflows \
+WF=$(curl -s -X POST http://localhost:8000/api/v1/workflows \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-ID: $TENANT" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Hello World",
@@ -449,27 +466,25 @@ curl -s -X POST http://localhost:8000/api/v1/workflows \
         { "id": "e2", "source_node_id": "template_1", "source_port": "default", "target_node_id": "output_1",   "target_port": "default" }
       ]
     }
-  }' | python3 -m json.tool
-# Note the workflow_id
-
-WORKFLOW_ID="<paste workflow_id>"
+  }')
+# Response field is "id" (not "workflow_id")
+WORKFLOW_ID=$(echo $WF | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])")
 
 # Trigger
-curl -s -X POST "http://localhost:8000/api/v1/workflows/$WORKFLOW_ID/trigger" \
+TRIGGER=$(curl -s -X POST "http://localhost:8000/api/v1/workflows/$WORKFLOW_ID/trigger" \
   -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-ID: $TENANT" \
   -H "Content-Type: application/json" \
-  -d '{ "input_data": { "name": "World" } }' | python3 -m json.tool
-# Note the run_id
+  -d '{ "input_data": { "name": "World" } }')
 # ManualTriggerNode wraps input_data as {"payload": {...}},
 # so {{ payload.name }} in the template resolves to "World".
+RUN_ID=$(echo $TRIGGER | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['run_id'])")
 
-RUN_ID="<paste run_id>"
-
-# Poll for result (usually done within 5s)
+# Poll for result (usually completes within 5s)
 curl -s "http://localhost:8000/api/v1/executions/$RUN_ID" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Tenant-ID: $TENANT" | python3 -m json.tool
 # "status": "SUCCESS"
-# output_data: {"value": {"rendered": "Hello, World!"}}
 ```
 
 ### Chat-driven workflow creation

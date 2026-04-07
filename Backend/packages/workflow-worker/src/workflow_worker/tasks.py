@@ -3,7 +3,7 @@ Celery Tasks for workflow execution, scheduling, and notifications.
 """
 from celery.utils.log import get_task_logger
 from workflow_worker.celery_app import app
-from workflow_worker.dependencies import get_engine, run_async, ConnectionErrorRetryable
+from workflow_worker.dependencies import get_engine, run_async, ConnectionErrorRetryable, get_tenant_config, build_orchestrator
 from workflow_engine.errors import WorkflowValidationError
 import traceback
 
@@ -35,14 +35,23 @@ def execute_workflow(
             logger.error(f"Run {run_id} not found")
             return False
 
+        # Store Celery task ID immediately so the API can cancel via revoke()
+        if self.request.id and run.celery_task_id != self.request.id:
+            run.celery_task_id = self.request.id
+            run_async(sdk["execution_repo"].patch_fields(tenant_id, run_id, {"celery_task_id": self.request.id}))
+
         workflow = run_async(sdk["workflow_repo"].get(tenant_id, run.workflow_id))
         if not workflow:
             logger.error(f"Workflow {run.workflow_id} not found")
             return False
 
+        # Build per-tenant orchestrator (respects plan-tier quotas and PII policy)
+        tenant_config = run_async(get_tenant_config(sdk, tenant_id))
+        orchestrator = build_orchestrator(sdk, tenant_config)
+
         if resume_node and human_response is not None:
             # Human-in-the-loop resume path
-            run_async(sdk["orchestrator"].resume(
+            run_async(orchestrator.resume(
                 tenant_id=tenant_id,
                 run_id=run_id,
                 node_id=resume_node,
@@ -51,7 +60,7 @@ def execute_workflow(
             ))
         else:
             # Normal execution path — use input_data from DB record (authoritative)
-            run_async(sdk["orchestrator"].run(
+            run_async(orchestrator.run(
                 workflow_def=workflow,
                 run_id=run_id,
                 tenant_id=tenant_id,
@@ -81,10 +90,12 @@ def execute_node(self, run_id: str, node_id: str, tenant_id: str):
     try:
         sdk = run_async(get_engine())
         logger.info(f"Executing node {node_id} for run {run_id}")
-        
+
         # Node execution is natively orchestrated via asyncio.gather() in RunOrchestrator.run()
         # This celery task remains for targeted single-node retries or heavy offloading.
-        run_async(sdk["orchestrator"]._process_node(node_id=node_id, run_id=run_id, tenant_id=tenant_id))
+        tenant_config = run_async(get_tenant_config(sdk, tenant_id))
+        orchestrator = build_orchestrator(sdk, tenant_config)
+        run_async(orchestrator._process_node(node_id=node_id, run_id=run_id, tenant_id=tenant_id))
     except WorkflowValidationError as exc:
         handle_dlq("execute_node", [run_id, node_id, tenant_id], {"exc": str(exc)})
         return False
@@ -140,13 +151,44 @@ def send_notification(self, type: str, content: dict, recipient: str):
     logger.info(f"Dispatching async notification {type} to {recipient} with content: {content}")
     # In a real implementation this hooks to SES / Twilio / Slack webhooks.
 
+@app.task(name="workflow_worker.tasks.reap_stale_runs")
+def reap_stale_runs():
+    """Mark RUNNING runs that started >15 minutes ago as FAILED (orphaned worker protection)."""
+    from datetime import datetime, timezone, timedelta
+    from workflow_engine.execution.state_machine import StateMachine
+    from workflow_engine.models import RunStatus
+    try:
+        sdk = run_async(get_engine())
+        threshold = datetime.now(timezone.utc) - timedelta(minutes=15)
+        stale = run_async(sdk["execution_repo"].list_stale_running(threshold))
+        for run in stale:
+            try:
+                run_async(StateMachine.transition_run(
+                    sdk["execution_repo"], run.tenant_id, run.run_id, RunStatus.FAILED
+                ))
+                logger.warning(
+                    "Reaped stale run %s (tenant=%s, started_at=%s)",
+                    run.run_id, run.tenant_id, run.started_at,
+                )
+            except Exception as exc:
+                logger.error("Failed to reap run %s: %s", run.run_id, exc)
+    except Exception as exc:
+        logger.error("reap_stale_runs failed: %s", exc)
+
+
 @app.task(name="workflow_worker.tasks.dead_letter_queue")
 def handle_dlq(failed_task_name: str, args: list, kwargs: dict):
     logger.error(f"DLQ Hit: Task {failed_task_name} failed. Args: {args}")
     sdk = run_async(get_engine())
-    if sdk.get("audit"):
-        run_async(sdk["audit"].create("SYSTEM", "task.failed", {
-            "task": failed_task_name,
-            "args": args,
-            "kwargs": kwargs
-        }))
+    audit = sdk.get("audit")
+    if audit:
+        tenant_id = (args[1] if len(args) > 1 else None) or "SYSTEM"
+        run_async(audit.write(
+            tenant_id=tenant_id,
+            event_type="task.failed",
+            detail={
+                "task": failed_task_name,
+                "args": args,
+                "kwargs": kwargs,
+            },
+        ))

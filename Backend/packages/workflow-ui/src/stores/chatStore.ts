@@ -106,7 +106,6 @@ export const useChatStore = create<ChatStore>()(
 
       // Apply the full REST response after a message round-trip
       applyMessageResponse: (response) => {
-        const { workflowStore } = require('./workflowStore')
         set(
           (s) => {
             const assistantMsg: ChatMessage = {

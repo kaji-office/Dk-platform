@@ -12,8 +12,10 @@ export default function ExecutionDetailPage() {
   const { id: workflowId, run_id: runId } = useParams<{ id: string; run_id: string }>()
 
   const { data: run } = useExecution(runId)
+  // nodeStates derived from run.node_states (embedded in run detail)
   const { data: nodeStates } = useExecutionNodes(runId)
-  const { data: logs } = useExecutionLogs(runId)
+  // logs endpoint may be unavailable — isError handled gracefully below
+  const { data: logs, isError: logsError } = useExecutionLogs(runId)
   const cancelMutation = useCancelExecution()
 
   // Connect to WS for live updates; fallback polling handles WS unavailability
@@ -82,7 +84,10 @@ export default function ExecutionDetailPage() {
       <section>
         <h2 className="text-sm font-medium mb-2">Logs</h2>
         <div className="rounded-md border border-border bg-muted/30 p-3 font-mono text-xs space-y-0.5 max-h-96 overflow-auto">
-          {(logs ?? []).map((log, i) => (
+          {logsError && (
+            <span className="text-muted-foreground">Log streaming not available for this run.</span>
+          )}
+          {!logsError && (logs ?? []).map((log, i) => (
             <div
               key={i}
               className={`${
@@ -98,7 +103,7 @@ export default function ExecutionDetailPage() {
               {log.message}
             </div>
           ))}
-          {(logs?.length ?? 0) === 0 && (
+          {!logsError && (logs?.length ?? 0) === 0 && (
             <span className="text-muted-foreground">No logs.</span>
           )}
         </div>

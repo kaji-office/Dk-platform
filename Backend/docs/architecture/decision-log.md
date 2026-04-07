@@ -1,5 +1,6 @@
 # Architecture Decision Records (ADR)
 ## AI Workflow Builder Platform
+**Last updated:** 2026-04-07 — verified against implemented codebase
 
 All key architectural decisions made during requirement gathering, with rationale and implications.
 
@@ -38,12 +39,12 @@ All key architectural decisions made during requirement gathering, with rational
 
 **Decision:** Implement a 4-tier isolation model. Node type determines isolation tier automatically. Users cannot override isolation tier.
 
-| Tier | Runtime | Used By | Overhead |
-|---|---|---|---|
-| 0 | Direct Python (in-process) | TriggerNode, LogicNode, HumanNode | ~0ms |
-| 1 | RestrictedPython (in-process AST sandbox) | AINode, APINode, TransformNode (simple) | ~5–15ms |
-| 2 | gVisor Container (user-space kernel) | TransformNode (Python), MCPNode | ~80–150ms |
-| 3 | Firecracker MicroVM | Reserved for future high-risk nodes | ~125–200ms |
+| Tier | Runtime | Used By | Overhead | Status |
+|---|---|---|---|---|
+| 0 | Direct Python (in-process) | Trigger nodes, ControlFlowNode, OutputNode, TemplatingNode, NoteNode | ~0ms | Implemented |
+| 1 | RestrictedPython (in-process AST sandbox) | CodeExecutionNode | ~5–15ms | Implemented |
+| 2 | gVisor Container (user-space kernel) | Planned: TransformNode (Python), MCPNode | ~80–150ms | Planned |
+| 3 | Firecracker MicroVM | Reserved for ENTERPRISE-only high-risk nodes | ~125–200ms | Planned |
 
 **Consequences:**
 - Tier 2 requires warm container pool to mitigate startup latency
@@ -143,7 +144,7 @@ All key architectural decisions made during requirement gathering, with rational
   "sub": "user_id",
   "tenant_id": "tenant_uuid",
   "email": "user@example.com",
-  "role": "editor",
+  "role": "OWNER",
   "plan": "PRO",
   "isolation_tier": "SHARED",
   "exp": 1735000000,
@@ -152,8 +153,11 @@ All key architectural decisions made during requirement gathering, with rational
 }
 ```
 
+> **Note:** `role` values are uppercase enum strings matching `UserRole`: `OWNER`, `EDITOR`, `VIEWER`.
+> The `UserModel` in `models/user.py` defines exactly these three roles.
+
 **RBAC Matrix:**
-| Action | Owner | Editor | Viewer |
+| Action | OWNER | EDITOR | VIEWER |
 |---|---|---|---|
 | Create/edit/delete workflow | ✓ | ✓ | ✗ |
 | Trigger execution | ✓ | ✓ | ✗ |
@@ -200,11 +204,12 @@ All key architectural decisions made during requirement gathering, with rational
 
 | Policy | Behaviour |
 |---|---|
+| `DISABLED` | PII scanning skipped entirely — no scan, no block |
 | `SCAN_WARN` | Detect PII → log warning → allow execution to proceed |
 | `SCAN_MASK` | Detect PII → redact before storing in execution logs → proceed |
-| `SCAN_BLOCK` | Detect PII in sensitive node types → halt execution → return error |
+| `SCAN_BLOCK` | Detect PII in trigger input or node outputs → halt execution → `RunStatus.FAILED` |
 
-**Default:** `SCAN_MASK` for all new tenants.
+**Default:** `SCAN_WARN` for all new tenants (`TenantConfig.pii_policy` default in `models/tenant.py`).
 **ENTERPRISE:** Can configure policy per workflow, not just per tenant.
 
 ---

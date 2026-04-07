@@ -3,6 +3,10 @@
 
 ---
 
+> **Local Development:** All infrastructure (MongoDB, PostgreSQL, Redis) runs as **native Ubuntu services** on the developer machine — no Docker required. LocalStack provides S3. See `docs/quickstart.md` Path C for setup. The AWS/EKS architecture below is the production deployment target.
+
+---
+
 ## 1. AWS Service Map
 
 ```

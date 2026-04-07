@@ -348,7 +348,7 @@ async def lifespan(app: FastAPI):
     # STARTUP:
     # - Connect motor MongoDB client → test connectivity
     # - Create asyncpg PostgreSQL connection pool → run migrations check
-    # - Connect aioredis → test PING
+    # - Connect redis[asyncio] → test PING
     # - Build EngineConfig from environment
     # - Initialize NodeTypeRegistry (register all 7 built-in nodes)
     # - Initialize TenantSemaphore
@@ -382,7 +382,7 @@ All SDK objects and DB clients are provided to route handlers via FastAPI's DI:
 | `get_engine_config()` | `EngineConfig` | Singleton (app-scoped) |
 | `get_mongo_db()` | `AsyncIOMotorDatabase` | Per-request (from connection pool) |
 | `get_pg_pool()` | `asyncpg.Pool` | Per-request (from connection pool) |
-| `get_redis()` | `aioredis.Redis` | Per-request (from connection pool) |
+| `get_redis()` | `redis.asyncio.Redis` | Per-request (from connection pool) |
 | `get_node_registry()` | `NodeTypeRegistry` | Singleton |
 | `get_tenant_semaphore()` | `TenantSemaphore` | Singleton |
 | `get_current_tenant()` | `Tenant` | Per-request (from JWT/API key auth) |
@@ -568,7 +568,7 @@ async def engine_error_handler(request: Request, exc: EngineError):
 | Concern | Design |
 |---|---|
 | **Stateless instances** | All state in Redis/MongoDB — API instances are fully stateless |
-| **Connection pooling** | Motor (MongoDB): pool_size=20. asyncpg (PG): min=5, max=20. aioredis: pool_size=10. |
+| **Connection pooling** | Motor (MongoDB): pool_size=20. asyncpg (PG): min=5, max=20. redis[asyncio]: pool_size=10. |
 | **HPA scaling** | Scale on CPU utilization > 70%. Min 2 replicas, max 10. |
 | **WebSocket fan-out** | Hub uses Redis pub/sub — multiple API instances each subscribe to same channel; each serves its own WS clients |
 | **Rate limiting** | Redis-based (not in-process) — consistent across all API instances |

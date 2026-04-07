@@ -163,8 +163,12 @@ async def create_schedule(
     request: Request,
     _: dict = RequireWrite,
 ) -> dict:
+    from fastapi import HTTPException
     svc = request.app.state.schedule_service
-    result = await svc.create(tenant_id, workflow_id, body)
+    try:
+        result = await svc.create(tenant_id, workflow_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     await request.app.state.audit_service.write(
         tenant_id=tenant_id, event_type="schedule.created", user_id=user["id"],
         resource_type="schedule", resource_id=result.get("schedule_id"),

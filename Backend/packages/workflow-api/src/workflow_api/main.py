@@ -89,6 +89,8 @@ class EmailService:
 class PlatformAuthService:
     """Coordinates JWTService + PasswordService + UserRepository for /auth routes."""
 
+    _TOKEN_CACHE_TTL = 300  # seconds — cache verified tokens for 5 minutes
+
     def __init__(
         self,
         jwt_svc: Any,
@@ -96,22 +98,31 @@ class PlatformAuthService:
         user_repo: Any,
         email_svc: EmailService | None = None,
         app_url: str = "http://localhost:3000",
+        redis_client: Any = None,
     ) -> None:
         self._jwt = jwt_svc
         self._pwd = pwd_svc
         self._users = user_repo
         self._email = email_svc
         self._app_url = app_url
+        self._redis = redis_client  # optional — graceful degradation if None
 
     async def verify_token(self, token: str) -> dict[str, Any]:
-        """Called by dependencies.py on every authenticated request."""
+        """Called by dependencies.py on every authenticated request.
+
+        For JWT tokens: checks Redis cache first (TTL=5min) before hitting Postgres.
+        For API keys: always verifies via DB (keys can be revoked at any time).
+        """
+        import hashlib, json as _json
+
         if token.startswith("wfk_"):
-            import hashlib
             key_hash = hashlib.sha256(token.encode()).hexdigest()
+            # API keys are not cached — revocation must be immediate
             row = await self._users._pool.fetchrow(
                 "SELECT ak.user_id, u.email, u.role, u.tenant_id "
                 "FROM api_keys ak JOIN users u ON ak.user_id = u.id "
                 "WHERE ak.key_hash = $1 AND ak.is_active = true "
+                "AND u.is_active = true "
                 "AND (ak.expires_at IS NULL OR ak.expires_at > NOW())",
                 key_hash,
             )
@@ -124,19 +135,41 @@ class PlatformAuthService:
                 "tenant_id": str(row["tenant_id"]),
             }
 
+        # JWT path — try Redis cache first
+        cache_key = f"auth:token:{hashlib.sha256(token.encode()).hexdigest()}"
+        if self._redis is not None:
+            try:
+                cached = await self._redis.get(cache_key)
+                if cached:
+                    return _json.loads(cached)
+            except Exception:
+                pass  # Redis unavailable — fall through to DB
+
         claims = self._jwt.verify_access_token(token)
         row = await self._users._pool.fetchrow(
-            "SELECT id, email, role, tenant_id FROM users WHERE id = $1",
+            "SELECT id, email, role, tenant_id, is_active, is_verified "
+            "FROM users WHERE id = $1",
             claims.user_id,
         )
         if not row:
             raise ValueError("User not found")
-        return {
+        if not row["is_active"]:
+            raise ValueError("Account is deactivated")
+        if not row["is_verified"]:
+            raise ValueError("Email not verified")
+        result = {
             "id": str(row["id"]),
             "email": row["email"],
             "role": row["role"],
             "tenant_id": str(row["tenant_id"]),
         }
+        # Cache the result in Redis with TTL
+        if self._redis is not None:
+            try:
+                await self._redis.setex(cache_key, self._TOKEN_CACHE_TTL, _json.dumps(result))
+            except Exception:
+                pass  # Redis write failure is non-fatal
+        return result
 
     async def register(self, email: str, password: str, full_name: str | None = None) -> dict:
         strength = self._pwd.validate_strength(password)
@@ -243,6 +276,12 @@ class PlatformAuthService:
         import secrets as _sec, hashlib as _hl
         token = _sec.token_urlsafe(32)
         token_hash = _hl.sha256(token.encode()).hexdigest()
+        # Invalidate any prior unused reset tokens for this user (P9-S-05)
+        await self._users._pool.execute(
+            "UPDATE password_reset_tokens SET used_at = NOW() "
+            "WHERE user_id = $1 AND used_at IS NULL AND expires_at > NOW()",
+            row["id"],
+        )
         await self._users._pool.execute(
             "INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) "
             "VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')",
@@ -311,8 +350,14 @@ class PlatformUserService:
         }
 
     async def update_profile(self, user_id: str, data: dict) -> dict:
-        # users table has no full_name/avatar_url columns — no-op for now;
-        # these would require an ALTER TABLE migration to add profile columns.
+        allowed = {k: v for k, v in data.items() if k in ("full_name", "avatar_url")}
+        if allowed:
+            set_clauses = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(allowed))
+            values = list(allowed.values())
+            await self._users._pool.execute(
+                f"UPDATE users SET {set_clauses} WHERE id = $1",
+                user_id, *values,
+            )
         return await self.get_profile(user_id)
 
     async def list_api_keys(self, user_id: str) -> list:
@@ -428,7 +473,8 @@ class PlatformWorkflowService:
         return await self.update(tenant_id, workflow_id, {"is_active": active})
 
     async def list_versions(self, tenant_id: str, workflow_id: str) -> list:
-        return []  # Versioning repo not in RepositoryBundle yet — v2 feature
+        from fastapi import HTTPException
+        raise HTTPException(status_code=501, detail="Workflow versioning not yet implemented")
 
     async def get_version(self, tenant_id: str, workflow_id: str, version_no: int) -> dict:
         from fastapi import HTTPException
@@ -461,8 +507,13 @@ class PlatformExecutionService:
         )
         await self._executions.create(tenant_id, run)
         try:
-            from workflow_worker.tasks import execute_workflow
-            execute_workflow.delay(run_id, tenant_id, workflow_id, input_data)
+            from workflow_worker.celery_app import app as _celery_app
+            from workflow_api.middleware.common import get_current_request_id
+            _celery_app.send_task(
+                "workflow_worker.tasks.execute_workflow",
+                args=[run_id, tenant_id, workflow_id, input_data],
+                headers={"x_request_id": get_current_request_id()},
+            )
         except ImportError:
             logger.warning("workflow_worker not available — run queued in DB but not dispatched")
         except Exception as exc:
@@ -481,18 +532,43 @@ class PlatformExecutionService:
         return run.model_dump(mode="json") if run else None
 
     async def cancel(self, tenant_id: str, run_id: str) -> dict:
+        from workflow_engine.execution.state_machine import StateMachine, StateTransitionError
+        from workflow_engine.models.execution import RunStatus
         run = await self._executions.get(tenant_id, run_id)
         if not run:
             raise ValueError("Run not found")
-        run.status = "CANCELLED"  # type: ignore[misc]
-        await self._executions.update_state(tenant_id, run_id, run)
+        try:
+            await StateMachine.transition_run(
+                self._executions, tenant_id, run_id, RunStatus.CANCELLED
+            )
+        except StateTransitionError as exc:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot cancel run in {run.status} state: {exc}",
+            )
+        # Signal the Celery worker to terminate the task (cooperative cancellation)
+        if run.celery_task_id:
+            from workflow_worker.celery_app import app as celery_app
+            celery_app.control.revoke(run.celery_task_id, terminate=True, signal="SIGTERM")
         return {"run_id": run_id, "status": "CANCELLED"}
 
     async def retry(self, tenant_id: str, run_id: str) -> dict:
+        from fastapi import HTTPException
+        from workflow_engine.models.execution import RunStatus
         run = await self._executions.get(tenant_id, run_id)
         if not run:
             raise ValueError("Run not found")
-        return await self.trigger(tenant_id, run.workflow_id, run.input_data or {})
+        if run.status not in (RunStatus.FAILED, RunStatus.CANCELLED):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Can only retry FAILED or CANCELLED runs (current status: {run.status})",
+            )
+        result = await self.trigger(tenant_id, run.workflow_id, run.input_data or {})
+        new_run_id = result["run_id"]
+        # Store the lineage link
+        await self._executions.patch_fields(tenant_id, new_run_id, {"retry_of": run_id})
+        return {"new_run_id": new_run_id, "original_run_id": run_id, "status": "QUEUED"}
 
     async def list_nodes(self, tenant_id: str, run_id: str) -> list:
         run = await self._executions.get(tenant_id, run_id)
@@ -509,8 +585,9 @@ class PlatformExecutionService:
         if run.status != "WAITING_HUMAN":
             raise ValueError(f"Run is not paused for human input (status: {run.status})")
         try:
-            from workflow_worker.tasks import execute_workflow
-            execute_workflow.apply_async(
+            from workflow_worker.celery_app import app as _celery_app
+            _celery_app.send_task(
+                "workflow_worker.tasks.execute_workflow",
                 args=[run_id, tenant_id, run.workflow_id, {}],
                 kwargs={"resume_node": node_id, "human_response": response},
             )
@@ -524,7 +601,8 @@ class PlatformExecutionService:
             return []
         logs: list[dict] = []
         for node_id, state in (run.node_states or {}).items():
-            for msg in state.get("logs", []):
+            state_logs = getattr(state, 'logs', None) or []
+            for msg in state_logs:
                 logs.append({"node_id": node_id, "message": msg, "run_id": run_id})
         return logs[skip: skip + limit]
 
@@ -634,15 +712,39 @@ class PlatformWebhookService:
         )
         return [self._row(r) for r in rows]
 
+    @staticmethod
+    def _validate_endpoint_url(url: str) -> None:
+        """Reject URLs that could be used for SSRF attacks (private/loopback ranges)."""
+        import ipaddress, urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"Webhook endpoint_url must use http or https (got: {parsed.scheme!r})")
+        hostname = parsed.hostname or ""
+        # Block loopback and link-local
+        blocked_hosts = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+        if hostname in blocked_hosts:
+            raise ValueError(f"Webhook endpoint_url cannot target {hostname!r}")
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                raise ValueError(f"Webhook endpoint_url targets a private/reserved IP: {hostname!r}")
+        except ValueError as exc:
+            if "cannot target" in str(exc) or "private" in str(exc):
+                raise
+            # hostname is a DNS name, not an IP — allow it (DNS rebinding is an ops concern)
+
     async def create(self, tenant_id: str, data: dict) -> dict:
         import secrets as _sec
+        endpoint_url = data.get("endpoint_url") or ""
+        if endpoint_url:
+            self._validate_endpoint_url(endpoint_url)
         hook_id = str(uuid.uuid4())
         secret = data.get("secret") or _sec.token_urlsafe(32)
         await self._pool.execute(
-            "INSERT INTO webhooks (id, tenant_id, workflow_id, name, events, webhook_secret, active, created_at, updated_at) "
-            "VALUES ($1, $2, $3, $4, $5::text[], $6, true, NOW(), NOW())",
+            "INSERT INTO webhooks (id, tenant_id, workflow_id, name, events, endpoint_url, webhook_secret, active, created_at, updated_at) "
+            "VALUES ($1, $2, $3, $4, $5::text[], $6, $7, true, NOW(), NOW())",
             hook_id, tenant_id, data["workflow_id"], data["name"],
-            data.get("events", ["execution.completed"]), secret,
+            data.get("events", ["execution.completed"]), endpoint_url or None, secret,
         )
         row = await self._pool.fetchrow(
             "SELECT id, tenant_id, workflow_id, name, events, endpoint_url, active, created_at FROM webhooks WHERE id = $1",
@@ -716,8 +818,11 @@ class PlatformWebhookService:
 
         run_id = f"run_{uuid.uuid4().hex[:16]}"
         try:
-            from workflow_worker.tasks import execute_workflow
-            execute_workflow.delay(run_id, tenant_id, workflow_id, body)
+            from workflow_worker.celery_app import app as _celery_app
+            _celery_app.send_task(
+                "workflow_worker.tasks.execute_workflow",
+                args=[run_id, tenant_id, workflow_id, body],
+            )
         except ImportError:
             logger.warning("workflow_worker unavailable — inbound webhook received but not dispatched")
 
@@ -837,10 +942,12 @@ async def lifespan(app: FastAPI):
     mongo_db = repos.workflows._collection.database
 
     # 7. Wire all services onto app.state
-    app.state.redis_client = redis_client  # exposed for WebSocket PubSub
+    app.state.redis_client = redis_client  # exposed for WebSocket PubSub and health checks
+    app.state.mongo_db = mongo_db          # exposed for health check (MongoDB ping)
+    app.state.repos = repos                # exposed for health check (Postgres ping)
 
     services: dict[str, Any] = {
-        "auth_service":      PlatformAuthService(jwt_svc, pwd_svc, repos.users, email_svc, app_url),
+        "auth_service":      PlatformAuthService(jwt_svc, pwd_svc, repos.users, email_svc, app_url, redis_client),
         "user_service":      PlatformUserService(repos.users),
         "workflow_service":  PlatformWorkflowService(repos.workflows),
         "execution_service": PlatformExecutionService(repos.executions, repos.workflows),

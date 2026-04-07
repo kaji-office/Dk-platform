@@ -26,6 +26,15 @@ class MongoScheduleRepository(ScheduleRepository):
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._collection = db["schedules"]
 
+    async def initialize_indexes(self) -> None:
+        """Create indexes on first startup. Safe to call multiple times (idempotent)."""
+        await self._collection.create_index(
+            [("tenant_id", 1), ("schedule_id", 1)], unique=True, name="idx_schedule_tenant_id"
+        )
+        await self._collection.create_index(
+            [("is_active", 1), ("next_fire_at", 1)], name="idx_schedule_due"
+        )
+
     async def get(self, tenant_id: str, schedule_id: str) -> ScheduleModel | None:
         """Fetch a specific schedule."""
         doc = await self._collection.find_one({"tenant_id": tenant_id, "schedule_id": schedule_id})

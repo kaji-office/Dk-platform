@@ -5,7 +5,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
-import type { Workflow, WorkflowSaveRequest, WorkflowDefinition, ApiResponse } from '@/types/api'
+import type { Workflow, WorkflowSaveRequest, ApiResponse } from '@/types/api'
 
 // ── Query keys (centralized to avoid typos) ───────────────────────────────────
 
@@ -21,9 +21,8 @@ export function useWorkflows() {
   return useQuery({
     queryKey: workflowKeys.list(),
     queryFn: async () => {
-      // Backend returns { workflows: Workflow[], skip: number, limit: number }
-      const { data } = await apiClient.get<{ workflows: Workflow[]; skip: number; limit: number }>('/api/v1/workflows')
-      return data.workflows ?? []
+      const { data } = await apiClient.get<ApiResponse<{ workflows: Workflow[] }>>('/api/v1/workflows')
+      return data.data.workflows
     },
   })
 }
@@ -55,14 +54,13 @@ export function useCreateWorkflow() {
 }
 
 // ── Save (auto-save) workflow ─────────────────────────────────────────────────
-// Body: WorkflowSaveRequest — flat fields, NOT wrapped in { workflow: }
-// This is used by the debounced auto-save hook.
+// PATCH /api/v1/workflows/{id} — flat fields (nodes/edges directly, no definition wrapper)
 
 export function useSaveWorkflow(id: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (body: WorkflowSaveRequest) => {
-      const { data } = await apiClient.put<ApiResponse<Workflow>>(
+      const { data } = await apiClient.patch<ApiResponse<Workflow>>(
         `/api/v1/workflows/${id}`,
         body,
       )

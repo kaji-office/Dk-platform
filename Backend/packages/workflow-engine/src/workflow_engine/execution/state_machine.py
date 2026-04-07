@@ -60,23 +60,24 @@ class StateMachine:
     @classmethod
     async def transition_node(
         cls, repo: ExecutionRepository, tenant_id: str, run_id: str, node_id: str, new_status: RunStatus, **kwargs: dict
-    ) -> ExecutionRun:
+    ) -> None:
         """
-        Update the state of a single NodeExecutionState and save the run.
+        Atomically update the state of a single NodeExecutionState.
+
+        Uses a targeted $set on node_states.<node_id> to avoid overwriting
+        sibling node states in parallel execution scenarios.
         """
-        run = await repo.get(tenant_id, run_id)
-        if not run:
-            raise WorkflowEngineError(f"Run {run_id} not found", code="RUN_NOT_FOUND")
-            
         from workflow_engine.models.execution import NodeExecutionState
-        
-        if node_id not in run.node_states:
-            run.node_states[node_id] = NodeExecutionState()
-            
-        run.node_states[node_id].status = new_status
+        from datetime import datetime, timezone
+
+        node_state = NodeExecutionState(status=new_status)
         if "outputs" in kwargs:
-            run.node_states[node_id].outputs = kwargs["outputs"]
+            node_state.outputs = kwargs["outputs"]
         if "error" in kwargs:
-            run.node_states[node_id].error = str(kwargs["error"])
-            
-        return await repo.update_state(tenant_id, run_id, run)
+            node_state.error = str(kwargs["error"])
+        if new_status == RunStatus.RUNNING:
+            node_state.started_at = datetime.now(timezone.utc)
+        elif new_status in (RunStatus.SUCCESS, RunStatus.FAILED, RunStatus.CANCELLED):
+            node_state.ended_at = datetime.now(timezone.utc)
+
+        await repo.update_node_state(tenant_id, run_id, node_id, node_state)

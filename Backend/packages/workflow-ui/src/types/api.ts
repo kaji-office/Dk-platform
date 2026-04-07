@@ -118,23 +118,30 @@ export interface WorkflowDefinition {
 }
 
 // ── Workflow CRUD ─────────────────────────────────────────────────────────────
+// NOTE: The API returns workflow fields flat (no `definition` wrapper).
+// nodes/edges/ui_metadata are top-level on the Workflow object.
 
 export interface Workflow {
   id: string
   name: string
   description: string
-  definition: WorkflowDefinition
-  tenant_id: string
-  created_at: string
-  updated_at: string
-  is_active: boolean
-  version: number
+  nodes: Record<string, NodeDefinition>
+  edges: EdgeDefinition[]
+  ui_metadata: Partial<WorkflowUIMetadata>
+  tenant_id?: string
+  created_at?: string
+  updated_at?: string
+  is_active?: boolean
+  version?: number
 }
 
+// PATCH /api/v1/workflows/{id} — flat fields, no definition wrapper
 export interface WorkflowSaveRequest {
   name?: string
   description?: string
-  definition?: WorkflowDefinition
+  nodes?: Record<string, NodeDefinition>
+  edges?: EdgeDefinition[]
+  ui_metadata?: Partial<WorkflowUIMetadata>
 }
 
 // ── Execution ─────────────────────────────────────────────────────────────────
@@ -156,6 +163,15 @@ export type NodeStatus =
   | 'SKIPPED'
   | 'SUSPENDED'
 
+// node_states shape embedded in run detail response
+export interface NodeState {
+  status: NodeStatus
+  started_at: string | null
+  ended_at: string | null
+  error: string | null
+  outputs: Record<string, unknown>
+}
+
 export interface ExecutionRun {
   run_id: string
   workflow_id: string
@@ -165,18 +181,19 @@ export interface ExecutionRun {
   ended_at: string | null
   input_data: Record<string, unknown>
   output_data: Record<string, unknown> | null
+  // node_states is embedded in the run detail (keyed by node_id)
+  node_states: Record<string, NodeState>
   error: string | null
 }
 
+// Kept for compatibility — the /nodes sub-endpoint is unreliable in current backend
 export interface NodeExecution {
   node_id: string
-  run_id: string
   status: NodeStatus
   started_at: string | null
   ended_at: string | null
-  output_preview: string | null
   error: string | null
-  retry_count: number
+  outputs: Record<string, unknown>
 }
 
 export interface ExecutionLog {
@@ -227,9 +244,10 @@ export interface InboundWebhook {
   name: string
   workflow_id: string
   tenant_id: string
-  endpoint_url: string
-  webhook_secret: string    // ⚠ only shown on creation
-  is_active: boolean
+  endpoint_url: string | null
+  secret: string            // ⚠ only shown on creation
+  active: boolean
+  events?: string[]
   created_at: string
 }
 
@@ -237,7 +255,7 @@ export interface InboundWebhookCreate {
   name: string
   workflow_id: string
   events?: string[]
-  is_active?: boolean
+  active?: boolean
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────

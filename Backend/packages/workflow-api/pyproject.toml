@@ -24,6 +24,9 @@ dependencies = [
     # Rate limiting
     "slowapi>=0.1.9,<1",
 
+    # Metrics
+    "prometheus-client>=0.20,<1",
+
     # Database clients — asyncpg used directly for raw SQL in service facades
     # motor is a transitive dep via workflow-engine (MongoDB handled there)
     "asyncpg>=0.29,<1",

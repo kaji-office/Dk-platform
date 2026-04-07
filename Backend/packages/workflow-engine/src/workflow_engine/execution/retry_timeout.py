@@ -5,17 +5,26 @@ import asyncio
 import random
 from typing import Any, Callable, Coroutine
 
-from workflow_engine.errors import NodeExecutionError
+from workflow_engine.errors import NodeExecutionError, SandboxTimeoutError
 
 
 class RetryConfig:
-    def __init__(self, max_attempts: int = 3, initial_delay_seconds: float = 1.0, 
-                 multiplier: float = 2.0, max_delay_seconds: float = 60.0, jitter: bool = True):
+    def __init__(
+        self,
+        max_attempts: int = 3,
+        initial_delay_seconds: float = 1.0,
+        multiplier: float = 2.0,
+        max_delay_seconds: float = 60.0,
+        jitter: bool = True,
+        non_retryable: tuple[type[Exception], ...] = (),
+    ):
         self.max_attempts = max_attempts
         self.initial_delay_seconds = initial_delay_seconds
         self.multiplier = multiplier
         self.max_delay_seconds = max_delay_seconds
         self.jitter = jitter
+        # Exceptions in this tuple are never retried — fail immediately
+        self.non_retryable = non_retryable
 
 
 class RetryHandler:
@@ -31,20 +40,25 @@ class RetryHandler:
 
     @classmethod
     async def execute_with_retry(
-        cls, 
-        coro_func: Callable[[], Coroutine[Any, Any, Any]], 
-        config: RetryConfig, 
+        cls,
+        coro_func: Callable[[], Coroutine[Any, Any, Any]],
+        config: RetryConfig,
     ) -> Any:
         attempt = 1
         while True:
             try:
                 return await coro_func()
+            except asyncio.CancelledError:
+                # Never swallow cancellation — propagate immediately
+                raise
             except Exception as e:
-                # Do not retry on timeout if we enforce strict
-                # Wait, retry limits are just attempts.
+                # Non-retryable exceptions fail immediately without retry
+                if config.non_retryable and isinstance(e, config.non_retryable):
+                    raise
+
                 if attempt >= config.max_attempts:
-                    raise e
-                
+                    raise
+
                 delay = cls.compute_backoff(attempt, config)
                 await asyncio.sleep(delay)
                 attempt += 1
@@ -62,7 +76,7 @@ class TimeoutManager:
         try:
             return await asyncio.wait_for(coro, timeout=timeout_seconds)
         except asyncio.TimeoutError as exc:
-            raise NodeExecutionError(
-                node_id, 
-                message=f"Node {node_id} exceeded timeout of {timeout_seconds}s"
+            # Raise SandboxTimeoutError (resource-limit violation) not NodeExecutionError (logic error)
+            raise SandboxTimeoutError(
+                message=f"Node {node_id} exceeded timeout of {timeout_seconds}s",
             ) from exc

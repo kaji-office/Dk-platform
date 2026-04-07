@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from workflow_engine.errors import NodeExecutionError, PIIBlockedError, SandboxTimeoutError
@@ -25,10 +26,21 @@ logger = logging.getLogger(__name__)
 class RunOrchestrator:
     """Orchestrates workflow execution, navigating the Graph and executing Nodes."""
 
-    def __init__(self, repo: ExecutionRepository, services: NodeServices, config: TenantConfig):
+    def __init__(self, repo: ExecutionRepository, services: NodeServices, config: TenantConfig, redis_client: Any = None):
         self.repo = repo
         self.services = services
         self.config = config
+        self._redis = redis_client  # Optional — enables PubSub event publishing for WS clients
+
+    async def _publish_event(self, run_id: str, event: dict) -> None:
+        """Publish an execution event to Redis PubSub channel for real-time WS streaming."""
+        if self._redis is None:
+            return
+        try:
+            import json as _json
+            await self._redis.publish(f"run:{run_id}:events", _json.dumps(event))
+        except Exception:
+            pass  # PubSub publish failure is non-fatal
 
     @trace_workflow
     async def run(
@@ -38,7 +50,8 @@ class RunOrchestrator:
         tenant_id: str,
         trigger_input: dict[str, Any],
         max_depth: int = 5,
-        current_depth: int = 0
+        current_depth: int = 0,
+        preloaded_outputs: dict[str, dict[str, Any]] | None = None,
     ) -> ExecutionRun | None:
         """Main entrypoint for 26-step DAG traversal."""
         if current_depth > max_depth:
@@ -54,7 +67,8 @@ class RunOrchestrator:
             await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.SUCCESS)
             return await self.repo.get(tenant_id, run_id)
 
-        outputs: dict[str, dict[str, Any]] = {}
+        # Preload outputs from prior phases (used when resuming after human input)
+        outputs: dict[str, dict[str, Any]] = dict(preloaded_outputs) if preloaded_outputs else {}
 
         async def _process_node(node_id: str) -> ExecutionRun | bool:
             """
@@ -86,9 +100,12 @@ class RunOrchestrator:
             except PIIBlockedError as exc:
                 await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
                 await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.FAILED, error={"message": str(exc)})
+                await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
+                await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
                 return await self.repo.get(tenant_id, run_id) or False
 
             await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.RUNNING)
+            await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.RUNNING.value, "ts": datetime.now(timezone.utc).isoformat()})
 
             async def _execute_loop() -> Any:
                 # Auto-load all run-scoped state written by SetStateNode into context.state
@@ -114,47 +131,93 @@ class RunOrchestrator:
                 async def _attempt() -> Any:
                     return await TimeoutManager.wrap(_execute_loop(), timeout, node_id)
 
-                rc = RetryConfig(max_attempts=retries)
+                rc = RetryConfig(
+                    max_attempts=retries,
+                    non_retryable=(SandboxTimeoutError, PIIBlockedError, NodeExecutionError),
+                )
                 result = await RetryHandler.execute_with_retry(_attempt, rc)
 
                 out_payload = result.outputs
                 PIIScanner.scan_dict(out_payload, self.config)
                 outputs[node_id] = out_payload
 
-                await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.SUCCESS, outputs=out_payload)
-
                 if result.metadata.get("terminal"):
+                    # Terminal node — write state immediately, then terminate the run.
+                    await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.SUCCESS, outputs=out_payload)
+                    await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.SUCCESS.value, "ts": datetime.now(timezone.utc).isoformat()})
                     run_state = await self.repo.get(tenant_id, run_id)
                     if run_state:
                         run_state.output_data = out_payload
                         await self.repo.update_state(tenant_id, run_id, run_state)
                     await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.SUCCESS)
+                    await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.SUCCESS.value, "ts": datetime.now(timezone.utc).isoformat()})
                     return await self.repo.get(tenant_id, run_id) or False
 
-                # Handle WAITING_HUMAN correctly
+                # Handle WAITING_HUMAN — write state immediately and pause.
                 if result.metadata.get("status") == RunStatus.WAITING_HUMAN.value:
                     await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.WAITING_HUMAN, outputs=out_payload)
                     await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.WAITING_HUMAN)
+                    await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.WAITING_HUMAN.value, "ts": datetime.now(timezone.utc).isoformat()})
+                    await self._publish_event(run_id, {"type": "run_waiting_human", "node_id": node_id, "ts": datetime.now(timezone.utc).isoformat()})
                     return await self.repo.get(tenant_id, run_id) or False
+
+                # Normal SUCCESS — defer DB write; buffer for batch $set at end of layer.
+                # The event is still published immediately for real-time WS streaming.
+                layer_success_buffer[node_id] = NodeExecutionState(
+                    status=RunStatus.SUCCESS,
+                    outputs=out_payload,
+                    ended_at=datetime.now(timezone.utc),
+                )
+                await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.SUCCESS.value, "ts": datetime.now(timezone.utc).isoformat()})
 
             except SandboxTimeoutError as exc:
                 await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.FAILED, error={"message": str(exc)})
                 await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
+                await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
+                await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
                 return await self.repo.get(tenant_id, run_id) or False
             except NodeExecutionError as exc:
                 await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.FAILED, error={"message": str(exc)})
                 await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
+                await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
+                await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
                 return await self.repo.get(tenant_id, run_id) or False
             except Exception as exc:
                 await StateMachine.transition_node(self.repo, tenant_id, run_id, node_id, RunStatus.FAILED, error={"message": str(exc)})
                 await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
+                await self._publish_event(run_id, {"type": "node_state", "node_id": node_id, "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
+                await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.FAILED.value, "ts": datetime.now(timezone.utc).isoformat()})
                 return await self.repo.get(tenant_id, run_id) or False
 
             return True
 
         for layer in topo_layers:
-            results = await asyncio.gather(*[_process_node(node_id) for node_id in layer])
-            for res in results:
+            # Per-layer buffer: normal SUCCESS writes are deferred here and flushed as a single
+            # bulk $set after gather completes — reduces N round-trips to 1 per layer.
+            layer_success_buffer: dict[str, NodeExecutionState] = {}
+
+            # return_exceptions=True ensures a failure in one branch doesn't cancel sibling nodes.
+            # Each sibling gets to finish (or fail) independently before we evaluate results.
+            results = await asyncio.gather(
+                *[_process_node(node_id) for node_id in layer],
+                return_exceptions=True,
+            )
+
+            # Flush deferred SUCCESS states as a single MongoDB $set operation.
+            if layer_success_buffer:
+                await self.repo.bulk_update_node_states(tenant_id, run_id, layer_success_buffer)
+
+            for i, res in enumerate(results):
+                if isinstance(res, BaseException):
+                    # An unhandled exception escaped _process_node — transition run to FAILED
+                    node_id = layer[i]
+                    logger.error(f"Unhandled exception in node {node_id}: {res}")
+                    await StateMachine.transition_node(
+                        self.repo, tenant_id, run_id, node_id, RunStatus.FAILED,
+                        error={"message": str(res)},
+                    )
+                    await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
+                    return await self.repo.get(tenant_id, run_id)
                 if isinstance(res, ExecutionRun):
                     # A terminal node, failure, or wait_human occurred. Return immediately.
                     return res
@@ -165,6 +228,7 @@ class RunOrchestrator:
             final_run.output_data = outputs.get(topo_sort[-1]) or {}
             await self.repo.update_state(tenant_id, run_id, final_run)
             await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.SUCCESS)
+            await self._publish_event(run_id, {"type": "run_complete", "status": RunStatus.SUCCESS.value, "ts": datetime.now(timezone.utc).isoformat()})
 
         return await self.repo.get(tenant_id, run_id)
 
@@ -213,8 +277,19 @@ class RunOrchestrator:
             edges=remaining_edges
         )
         
+        # Reconstruct outputs from all completed nodes so downstream nodes have access
+        # to pre-human phase outputs (e.g. AINode output referenced by TemplatingNode)
+        run = await self.repo.get(tenant_id, run_id)
+        preloaded: dict[str, dict] = {}
+        if run:
+            for nid, state in run.node_states.items():
+                if state.status == RunStatus.SUCCESS and state.outputs:
+                    preloaded[nid] = state.outputs
+        # Include the just-accepted human response under the human node's id
+        preloaded[node_id] = human_response
+
         # Dispatch sub-workflow natively via recursion layer (avoid infinite recursion via current_depth)
-        return await self.run(sub_workflow, run_id, tenant_id, {}, current_depth=1)
+        return await self.run(sub_workflow, run_id, tenant_id, {}, current_depth=1, preloaded_outputs=preloaded)
 
     def _get_node_def(self, definition: WorkflowDefinition, node_id: str) -> NodeDefinition:
         node = definition.nodes.get(node_id)

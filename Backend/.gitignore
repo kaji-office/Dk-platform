@@ -62,6 +62,8 @@ test-results/
 test-reports/
 junit.xml
 .hypothesis/
+playwright-report/
+blob-report/
 
 # ── Linting & Type Checking ───────────────────────────────────────────────────
 .mypy_cache/
@@ -70,6 +72,7 @@ dmypy.json
 .ruff_cache/
 .pytype/
 .pyre/
+.import_linter_cache/
 
 # ── Celery ────────────────────────────────────────────────────────────────────
 celerybeat-schedule
@@ -134,9 +137,11 @@ pnpm-debug.log*
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# Lock files: commit for applications, ignore only for libraries
+# Uncomment the line below only if this repo is a publishable library
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 # Keep Dockerfiles committed; ignore local build artifacts
@@ -171,6 +176,11 @@ scratch/
 fix_openapi.py
 update_tasks.py
 update_tasks_fix.py
+summary_status_for_all_modules.txt
+# macOS Finder duplicates ("file copy.ext" / "file copy 2.ext")
+* copy
+* copy.*
+* copy [0-9].*
 
 # ── OS Generated ──────────────────────────────────────────────────────────────
 .DS_Store

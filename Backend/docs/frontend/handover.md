@@ -166,9 +166,9 @@ interface NodeUIConfig {
 
 interface EdgeDefinition {
   id: string                // e.g. "edge_node1_output__node2_input"
-  source_node_id: string
+  source_node: string       // source node_id (NOT source_node_id)
   source_port: string       // "default" = pass all upstream outputs; named port = e.g. "true", "false", "rendered"
-  target_node_id: string
+  target_node: string       // target node_id (NOT target_node_id)
   target_port: string       // "default" = spread all values as top-level template variables;
                             // named port = e.g. "input" nests them under that key
 }
@@ -183,7 +183,7 @@ interface WorkflowUIMetadata {
 ```
 
 > **Note:** The template used `nodes: []` (array) — the real format is `nodes: {}` (object keyed
-> by node_id). Edge fields are `source_node_id / target_node_id`, not `source / target`.
+> by node_id). Edge fields are `source_node / target_node` (NOT `source_node_id / target_node_id`, NOT bare `source / target`).
 
 ### 3.4 Workflow Update Request/Response
 
@@ -281,19 +281,22 @@ type ChatWsEvent =
 > comes from the REST endpoints — never from the WebSocket. This keeps the WS lean and
 > the REST API as the single source of truth for session state.
 
-### Execution WebSocket — `/ws/executions/{run_id}`
+### Execution WebSocket — `WS /api/v1/ws/executions/{run_id}`
+
+> **Auth:** Pass JWT as query param: `?token=<access_token>` (browsers cannot set Authorization headers on WS connections).
 
 ```typescript
+// These are the exact event types published by RunOrchestrator to Redis PubSub channel
+// `run:{run_id}:events`, then fanned out to the browser by the WebSocket hub.
 type ExecutionWsEvent =
-  | { type: 'RUN_STARTED';    run_id: string; started_at: string }
-  | { type: 'RUN_COMPLETED';  run_id: string; status: 'SUCCESS' | 'FAILED'; ended_at: string }
-  | { type: 'NODE_STARTED';   run_id: string; node_id: string; started_at: string }
-  | { type: 'NODE_COMPLETED'; run_id: string; node_id: string; status: string; ended_at: string }
-  | { type: 'NODE_FAILED';    run_id: string; node_id: string; error: string; retry_count: number }
-  | { type: 'NODE_LOG';       run_id: string; node_id: string; level: 'INFO'|'WARN'|'ERROR'; message: string }
-  | { type: 'HUMAN_WAITING';  run_id: string; node_id: string; form_schema: object }
-  | { type: 'HEARTBEAT';      timestamp: string }
+  | { type: 'node_state';        node_id: string; status: 'RUNNING' | 'SUCCESS' | 'FAILED'; ts: string }
+  | { type: 'run_complete';      status: 'SUCCESS' | 'FAILED'; ts: string }
+  | { type: 'run_waiting_human'; node_id: string; ts: string }
 ```
+
+> **Note:** Event types are lowercase snake_case (`node_state`, `run_complete`, `run_waiting_human`).
+> NOT PascalCase (`RUN_STARTED`, `NODE_COMPLETED`, etc.) as the earlier template stated.
+> There is no `NODE_LOG`, `HEARTBEAT`, or `RUN_STARTED` event in v1.0.
 
 ---
 
@@ -482,7 +485,7 @@ headers["X-Webhook-Signature"] = f"sha256={sig}"
 | `PUT /workflow/update` | `PUT /api/v1/chat/sessions/{id}/workflow` |
 | All paths prefixed `/v1/` | Prefix is `/api/v1/` |
 | `nodes: []` (array) | `nodes: {}` (object keyed by node_id) |
-| Edge fields `source / target` | `source_node_id / target_node_id` + `source_port / target_port` |
+| Edge fields `source / target` | `source_node / target_node` + `source_port / target_port` |
 | `type: "text \| select \| boolean"` | `input_type: "text \| select \| multiselect \| boolean \| number"` |
 | 6 generic node types | 17 specific node types (see §4) |
 | Single global state object | Two stores: `chatStore` + `workflowStore` |

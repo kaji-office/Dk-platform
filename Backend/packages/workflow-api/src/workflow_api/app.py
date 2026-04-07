@@ -12,16 +12,26 @@ so they have access to the validated request body and path parameters.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import FastAPI, Request, status
+
+# Configure structured JSON logging at import time so all loggers (including
+# uvicorn's access logger) emit JSON from the very first request.
+try:
+    from workflow_engine.observability.logging import configure_structured_logging
+    _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    configure_structured_logging(level=_log_level)
+except Exception:
+    logging.basicConfig(level=logging.INFO)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from workflow_api.limiter import limiter
 from workflow_api.middleware.common import RequestIDMiddleware, ResponseEnvelopeMiddleware
 from workflow_api.routes.health import router as health_router
 from workflow_api.routes.auth import router as auth_router
@@ -37,20 +47,6 @@ from workflow_api.routes.webhooks import (
 from workflow_api.websocket.execution_ws import router as ws_router
 from workflow_api.routes.chat import router as chat_router
 
-# ── Rate limiter (SlowAPI) ────────────────────────────────────────────────────
-
-def _get_tenant_key(request: Request) -> str:
-    """Rate-limit key: tenant_id from auth context, fallback to IP."""
-    user = getattr(request.state, "user", None)
-    if user and user.get("tenant_id"):
-        return f"tenant:{user['tenant_id']}"
-    return get_remote_address(request)
-
-
-_redis_url = os.environ.get("REDIS_URL", "memory://")
-limiter = Limiter(key_func=_get_tenant_key, default_limits=["60/minute"], storage_uri=_redis_url)
-
-
 def create_app(
     cors_origins: list[str] | None = None,
     services: dict | None = None,
@@ -59,10 +55,20 @@ def create_app(
     Application factory.
 
     Args:
-        cors_origins: Allowed CORS origins. Defaults to all (*) for dev.
+        cors_origins: Allowed CORS origins. Read from CORS_ORIGINS env var (comma-separated).
+                      Credentials + wildcard origin is rejected by browsers — must be explicit.
         services:     Dict of service objects injected into app.state
                       (auth_service, workflow_service, execution_service, ...).
     """
+    # Resolve CORS origins — explicit list required; wildcard+credentials is browser-blocked
+    if cors_origins is None:
+        env_origins = os.environ.get("CORS_ORIGINS", "")
+        if env_origins:
+            cors_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+        else:
+            # Dev fallback only — acceptable without credentials in local env
+            cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000", "http://192.168.1.93:3000","http://192.168.1.93:5173", "http://192.168.1.93:5174"]
+
     app = FastAPI(
         title="DK Workflow API",
         version="1.0.0",
@@ -77,13 +83,13 @@ def create_app(
     # 1. Request ID (outermost — first to see request, last to see response)
     app.add_middleware(RequestIDMiddleware)
 
-    # 2. CORS
+    # 2. CORS — explicit origin list required (wildcard + credentials is browser-blocked)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=cors_origins or ["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-API-Key", "X-Tenant-ID"],
         expose_headers=["X-Request-ID", "Retry-After"],
     )
 
@@ -120,11 +126,23 @@ def create_app(
     app.include_router(chat_router,       prefix="/api/v1")
 
     # ── Global error handler ───────────────────────────────────────────────
+    import logging as _logging
+    _logger = _logging.getLogger("dk.api")
+
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
+        request_id = getattr(request.state, "request_id", "unknown")
+        _logger.exception(
+            "Unhandled exception on %s %s (request_id=%s) — %s: %s",
+            request.method,
+            request.url.path,
+            request_id,
+            type(exc).__name__,
+            exc,
+        )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"success": False, "detail": "Internal server error"},
+            content={"success": False, "request_id": request_id, "detail": "Internal server error"},
         )
 
     return app

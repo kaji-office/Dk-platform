@@ -26,6 +26,19 @@ class MongoExecutionRepository(ExecutionRepository):
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._collection = db["execution_runs"]
 
+    async def initialize_indexes(self) -> None:
+        """Create indexes on first startup. Safe to call multiple times (idempotent)."""
+        await self._collection.create_index(
+            [("tenant_id", 1), ("run_id", 1)], unique=True, name="idx_execution_tenant_run"
+        )
+        await self._collection.create_index(
+            [("tenant_id", 1), ("workflow_id", 1), ("started_at", -1)],
+            name="idx_execution_tenant_workflow_date",
+        )
+        await self._collection.create_index(
+            [("status", 1), ("started_at", 1)], name="idx_execution_stale_reaper"
+        )
+
     async def get(self, tenant_id: str, run_id: str) -> ExecutionRun | None:
         """Fetch a specific execution run."""
         doc = await self._collection.find_one({"tenant_id": tenant_id, "run_id": run_id})
@@ -102,6 +115,56 @@ class MongoExecutionRepository(ExecutionRepository):
             .skip(skip)\
             .limit(limit)
 
+        runs = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            runs.append(ExecutionRun.model_validate(doc))
+        return runs
+
+    async def patch_fields(self, tenant_id: str, run_id: str, fields: dict) -> None:
+        """Atomically $set a partial set of top-level fields without replacing the full document."""
+        await self._collection.update_one(
+            {"tenant_id": tenant_id, "run_id": run_id},
+            {"$set": fields},
+        )
+
+    async def update_node_state(
+        self,
+        tenant_id: str,
+        run_id: str,
+        node_id: str,
+        node_state,  # NodeExecutionState
+    ) -> None:
+        """Atomically $set a single node's state — safe for parallel node writes."""
+        await self._collection.update_one(
+            {"tenant_id": tenant_id, "run_id": run_id},
+            {"$set": {f"node_states.{node_id}": node_state.model_dump(mode="json")}},
+        )
+
+    async def bulk_update_node_states(
+        self,
+        tenant_id: str,
+        run_id: str,
+        states: dict,  # dict[str, NodeExecutionState]
+    ) -> None:
+        """Batch $set multiple node states in a single MongoDB operation — one round-trip per layer."""
+        if not states:
+            return
+        set_ops = {
+            f"node_states.{node_id}": state.model_dump(mode="json")
+            for node_id, state in states.items()
+        }
+        await self._collection.update_one(
+            {"tenant_id": tenant_id, "run_id": run_id},
+            {"$set": set_ops},
+        )
+
+    async def list_stale_running(self, before) -> list[ExecutionRun]:
+        """Return all RUNNING runs whose started_at is older than `before`."""
+        cursor = self._collection.find({
+            "status": "RUNNING",
+            "started_at": {"$lt": before},
+        })
         runs = []
         async for doc in cursor:
             doc.pop("_id", None)

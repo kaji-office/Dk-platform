@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
+from workflow_api.limiter import limiter
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -41,6 +42,7 @@ class MFAVerifyRequest(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def register(body: RegisterRequest, request: Request) -> dict:
     """Register a new user account."""
     svc = request.app.state.auth_service
@@ -57,6 +59,7 @@ async def register(body: RegisterRequest, request: Request) -> dict:
 
 
 @router.post("/login")
+@limiter.limit("5/minute")
 async def login(body: LoginRequest, request: Request) -> dict:
     """Authenticate and return JWT access + refresh tokens."""
     svc = request.app.state.auth_service
@@ -104,6 +107,7 @@ async def verify_email(token: str, request: Request) -> dict:
 
 
 @router.post("/password/reset-request")
+@limiter.limit("3/minute")
 async def password_reset_request(body: PasswordResetRequest, request: Request) -> dict:
     svc = request.app.state.auth_service
     await svc.send_password_reset(body.email)

@@ -467,7 +467,7 @@ The SDK has **15 modules** (including config), organized into the 4 sub-layers:
 | `pydantic-settings` | v2.x | `EngineConfig` — env var injection |
 | `httpx` | 0.27+ | Async HTTP client for REST adapter and provider calls |
 | `motor` | 3.x | Async MongoDB driver — state, audit, versioning |
-| `aioredis` | 2.x | Async Redis — context store, rate limiting, pub/sub, cache |
+| `redis[asyncio]` | 5.x | Async Redis — context store, rate limiting, pub/sub, cache |
 | `asyncpg` | 0.29+ | Async PostgreSQL — pgvector semantic cache, OAuth credentials |
 | `pgvector` | 0.3+ | Python pgvector extension for cosine similarity |
 | `tiktoken` | 0.7+ | Token counting for OpenAI + Claude models |
@@ -850,7 +850,7 @@ dependencies = [
     "pydantic-settings>=2.3,<3",
     "httpx>=0.27,<1",
     "motor>=3.4,<4",
-    "aioredis>=2.0,<3",
+    "redis[asyncio]>=5.0",
     "asyncpg>=0.29,<1",
     "pgvector>=0.3,<1",
     "tiktoken>=0.7,<1",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import builtins
+from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from .models import ExecutionRun, ScheduleModel, TenantConfig, UserModel, WorkflowDefinition
@@ -53,6 +54,37 @@ class ExecutionRepository(abc.ABC):
 
     @abc.abstractmethod
     async def list_runs_by_tenant(self, tenant_id: str, skip: int = 0, limit: int = 50) -> builtins.list["ExecutionRun"]:
+        pass
+
+    @abc.abstractmethod
+    async def patch_fields(self, tenant_id: str, run_id: str, fields: dict[str, Any]) -> None:
+        """Atomically update a partial set of top-level fields on an execution run."""
+        pass
+
+    @abc.abstractmethod
+    async def update_node_state(
+        self,
+        tenant_id: str,
+        run_id: str,
+        node_id: str,
+        node_state: "NodeExecutionState",
+    ) -> None:
+        """Atomically $set a single node's state without replacing the full run document."""
+        pass
+
+    @abc.abstractmethod
+    async def bulk_update_node_states(
+        self,
+        tenant_id: str,
+        run_id: str,
+        states: dict[str, "NodeExecutionState"],
+    ) -> None:
+        """Atomically $set multiple node states in a single MongoDB round-trip (one $set per layer)."""
+        pass
+
+    @abc.abstractmethod
+    async def list_stale_running(self, before: "datetime") -> builtins.list["ExecutionRun"]:
+        """Return all runs in RUNNING status with started_at older than `before`."""
         pass
 
 class UserRepository(abc.ABC):

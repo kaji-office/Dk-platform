@@ -16,6 +16,13 @@ def _request(method, path, **kwargs):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return httpx.request(method, url, headers=headers, **kwargs)
 
+def _unwrap(res):
+    """Unwrap the {success, data} envelope if present."""
+    body = res.json()
+    if isinstance(body, dict) and "data" in body:
+        return body["data"]
+    return body
+
 @click.group(name="workflow")
 def workflow():
     """Manage Workflow definitions"""
@@ -24,17 +31,16 @@ def workflow():
 @workflow.command()
 def list():
     """List all workflow definitions in tenant"""
-    res = _request("GET", "/workflows/")
+    res = _request("GET", "/api/v1/workflows")
     if res.is_success:
-        data = res.json().get("data", [])
+        data = _unwrap(res)
+        workflows = data.get("workflows", []) if isinstance(data, dict) else data
         table = Table(title="Workflows")
         table.add_column("ID", justify="left")
         table.add_column("Name", justify="left")
-        table.add_column("Version", justify="right")
         table.add_column("Active", justify="center")
-        
-        for wf in data:
-            table.add_row(wf["id"], wf["name"], str(wf.get("version", 1)), str(wf.get("is_active", False)))
+        for wf in workflows:
+            table.add_row(wf.get("id", ""), wf.get("name", ""), str(wf.get("is_active", False)))
         console.print(table)
     else:
         console.print(f"[red]Failed: {res.text}[/red]")
@@ -42,36 +48,44 @@ def list():
 @workflow.command()
 @click.argument("workflow_id")
 def get(workflow_id):
-    res = _request("GET", f"/workflows/{workflow_id}")
+    """Get a workflow definition by ID"""
+    res = _request("GET", f"/api/v1/workflows/{workflow_id}")
     if res.is_success:
-        console.print(res.json())
+        console.print(_unwrap(res))
     else:
         console.print(f"[red]Failed: {res.text}[/red]")
 
 @workflow.command()
-@click.argument("name")
+@click.option("--name", required=True, help="Workflow name")
 def create(name):
     """Create a new empty workflow"""
-    payload = {
-        "id": name.lower().replace(" ", "-"),
-        "name": name,
-        "nodes": {},
-        "edges": []
-    }
-    res = _request("POST", "/workflows/", json=payload)
+    payload = {"name": name, "definition": {"nodes": {}, "edges": []}}
+    res = _request("POST", "/api/v1/workflows", json=payload)
     if res.is_success:
-        console.print(f"[green]Workflow {name} created.[/green]")
+        data = _unwrap(res)
+        wf_id = data.get("id", "")
+        console.print(f"[green]Workflow '{name}' created with id: {wf_id}[/green]")
     else:
         console.print(f"[red]Failed: {res.text}[/red]")
 
 @workflow.command()
 @click.argument("workflow_id")
-@click.argument("file", type=click.File("rb"))
-def update(workflow_id, file):
-    """Update workflow from JSON file definition"""
+@click.option("--name", default=None, help="New workflow name")
+@click.option("--file", "file_path", default=None, type=click.Path(exists=True), help="JSON file with workflow definition")
+def update(workflow_id, name, file_path):
+    """Update workflow (by name, or from JSON file definition)"""
     import json
-    data = json.load(file)
-    res = _request("PUT", f"/workflows/{workflow_id}", json=data)
+    if file_path:
+        with open(file_path, "rb") as f:
+            data = json.load(f)
+    else:
+        data = {}
+    if name:
+        data["name"] = name
+    if not data:
+        console.print("[red]Provide --name or --file to update.[/red]")
+        return
+    res = _request("PATCH", f"/api/v1/workflows/{workflow_id}", json=data)
     if res.is_success:
         console.print("[green]Workflow updated successfully.[/green]")
     else:
@@ -80,7 +94,8 @@ def update(workflow_id, file):
 @workflow.command()
 @click.argument("workflow_id")
 def delete(workflow_id):
-    res = _request("DELETE", f"/workflows/{workflow_id}")
+    """Delete a workflow"""
+    res = _request("DELETE", f"/api/v1/workflows/{workflow_id}")
     if res.is_success:
         console.print(f"[yellow]Deleted {workflow_id}[/yellow]")
     else:
@@ -89,7 +104,8 @@ def delete(workflow_id):
 @workflow.command()
 @click.argument("workflow_id")
 def activate(workflow_id):
-    res = _request("POST", f"/workflows/{workflow_id}/activate")
+    """Activate a workflow (enable execution)"""
+    res = _request("POST", f"/api/v1/workflows/{workflow_id}/activate")
     if res.is_success:
         console.print(f"[green]Activated {workflow_id}[/green]")
     else:
@@ -98,7 +114,8 @@ def activate(workflow_id):
 @workflow.command()
 @click.argument("workflow_id")
 def deactivate(workflow_id):
-    res = _request("DELETE", f"/workflows/{workflow_id}/activate")
+    """Deactivate a workflow (disable execution)"""
+    res = _request("POST", f"/api/v1/workflows/{workflow_id}/deactivate")
     if res.is_success:
         console.print(f"[yellow]Deactivated {workflow_id}[/yellow]")
     else:

@@ -19,6 +19,13 @@ def _request(method, path, **kwargs):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     return httpx.request(method, url, headers=headers, **kwargs)
 
+def _unwrap(res):
+    """Unwrap the {success, data} envelope if present."""
+    body = res.json()
+    if isinstance(body, dict) and "data" in body:
+        return body["data"]
+    return body
+
 @click.group(name="run")
 def run():
     """Manage Execution runs"""
@@ -34,12 +41,13 @@ def trigger(workflow_id, input_data):
     except json.JSONDecodeError:
         console.print("[red]Invalid JSON input[/red]")
         sys.exit(1)
-        
-    res = _request("POST", f"/workflows/{workflow_id}/trigger", json=data)
-    
+
+    res = _request("POST", f"/api/v1/workflows/{workflow_id}/trigger", json={"input_data": data})
+
     if res.is_success:
-        run_data = res.json().get("data", {})
-        console.print(f"[green]QUEUED run: [bold]{run_data.get('id')}[/bold][/green]")
+        run_data = _unwrap(res)
+        run_id = run_data.get("run_id") or run_data.get("id")
+        console.print(f"[green]QUEUED run: [bold]{run_id}[/bold][/green]")
         sys.exit(0)
     else:
         console.print(f"[red]Error triggering run: {res.text}[/red]")
@@ -49,46 +57,54 @@ def trigger(workflow_id, input_data):
 @click.argument("run_id")
 def status(run_id):
     """Get status of an execution run"""
-    res = _request("GET", f"/executions/{run_id}")
+    res = _request("GET", f"/api/v1/executions/{run_id}")
     if res.is_success:
-        console.print(res.json())
+        console.print(_unwrap(res))
     else:
         console.print(f"[red]Failed: {res.text}[/red]")
-        
+
 @run.command()
 @click.argument("run_id")
 def cancel(run_id):
     """Cancel an execution run"""
-    res = _request("POST", f"/executions/{run_id}/cancel")
+    res = _request("POST", f"/api/v1/executions/{run_id}/cancel")
     if res.is_success:
         console.print(f"[green]Started cancellation of {run_id}[/green]")
     else:
         console.print(f"[red]Failed: {res.text}[/red]")
 
-async def stream_logs(run_id, token):
-    # Convert active base HTTP URL to WS URL
+async def stream_logs(run_id, token, max_reconnects=3):
     http_url = get_base_url()
     ws_url = http_url.replace("http://", "ws://").replace("https://", "wss://")
-    ws_endpoint = f"{ws_url}/ws/executions/{run_id}?token={token}"
-    
-    try:
-        # Note: server enforces 200ms polling latency to streams NodeExecutionState
-        async with websockets.connect(ws_endpoint) as wsock:
-            while True:
-                message = await wsock.recv()
-                data = json.loads(message)
-                # Stream logs cleanly
-                if data.get("type") == "node_update":
-                    node = data.get("node_id")
-                    status = data.get("status")
-                    console.print(f"[blue][{node}][/blue]: {status}")
-                elif data.get("type") in ("terminal", "error"):
-                    console.print(f"[yellow]Execution terminated: {data.get('status')}[/yellow]")
-                    break
-                else:
-                    console.print(str(data))
-    except websockets.exceptions.ConnectionClosed:
-        console.print("[yellow]Websocket stream closed by server.[/yellow]")
+    ws_endpoint = f"{ws_url}/api/v1/ws/executions/{run_id}?token={token}"
+
+    for attempt in range(max_reconnects):
+        try:
+            async with websockets.connect(ws_endpoint) as wsock:
+                while True:
+                    message = await wsock.recv()
+                    data = json.loads(message)
+                    msg_type = data.get("type")
+                    if msg_type in ("node_state", "node_update"):
+                        node = data.get("node_id")
+                        node_status = data.get("status")
+                        console.print(f"[blue][{node}][/blue]: {node_status}")
+                    elif msg_type in ("run_complete", "terminal"):
+                        run_status = data.get("status")
+                        console.print(f"[yellow]Execution terminated: {run_status}[/yellow]")
+                        return
+                    elif msg_type == "error":
+                        console.print(f"[red]Error: {data.get('detail')}[/red]")
+                        return
+                    else:
+                        console.print(str(data))
+        except websockets.exceptions.ConnectionClosed as exc:
+            if attempt < max_reconnects - 1:
+                wait = 2 ** attempt
+                console.print(f"[yellow]Stream disconnected (attempt {attempt + 1}/{max_reconnects}), retrying in {wait}s...[/yellow]")
+                await asyncio.sleep(wait)
+            else:
+                console.print("[yellow]Stream closed — max reconnects reached.[/yellow]")
 
 @run.command()
 @click.argument("run_id")
@@ -100,14 +116,13 @@ def logs(run_id, follow):
         if not token:
             console.print("[red]Authentication required for WebSocket streaming[/red]")
             sys.exit(1)
-        # AC: wf run logs <run_id> --follow streams logs to stdout
         try:
             asyncio.run(stream_logs(run_id, token))
         except Exception as e:
             console.print(f"[red]Stream connection failed: {e}[/red]")
     else:
-        res = _request("GET", f"/executions/{run_id}/logs")
+        res = _request("GET", f"/api/v1/executions/{run_id}/logs")
         if res.is_success:
-            console.print(res.json())
+            console.print(_unwrap(res))
         else:
             console.print(f"[red]Failed: {res.text}[/red]")

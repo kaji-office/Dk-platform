@@ -5,36 +5,33 @@
 
 'use client'
 
-import ReactFlow, {
-  Background,
-  Controls,
-  MiniMap,
-  BackgroundVariant,
-} from 'reactflow'
-import 'reactflow/dist/style.css'
+import { ReactFlow, Background, Controls, MiniMap, BackgroundVariant, type NodeTypes } from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
 import { useWorkflowStore } from '@/stores/workflowStore'
 import { WorkflowNode } from '@/components/nodes/WorkflowNode'
 
 // All 17 node types map to a single generic component that reads ui_config.
-// Custom node components can be added here as the app grows.
-const nodeTypes = {
-  PromptNode: WorkflowNode,
-  AgentNode: WorkflowNode,
-  SemanticSearchNode: WorkflowNode,
-  CodeExecutionNode: WorkflowNode,
-  APIRequestNode: WorkflowNode,
-  TemplatingNode: WorkflowNode,
-  WebSearchNode: WorkflowNode,
-  MCPNode: WorkflowNode,
-  SetStateNode: WorkflowNode,
-  CustomNode: WorkflowNode,
-  NoteNode: WorkflowNode,
-  OutputNode: WorkflowNode,
-  ControlFlowNode: WorkflowNode,
-  SubworkflowNode: WorkflowNode,
-  ManualTriggerNode: WorkflowNode,
-  ScheduledTriggerNode: WorkflowNode,
-  IntegrationTriggerNode: WorkflowNode,
+// Cast as NodeTypes to satisfy @xyflow/react v12 strict generics.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const nodeTypes: NodeTypes = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  PromptNode: WorkflowNode as any,
+  AgentNode: WorkflowNode as any,
+  SemanticSearchNode: WorkflowNode as any,
+  CodeExecutionNode: WorkflowNode as any,
+  APIRequestNode: WorkflowNode as any,
+  TemplatingNode: WorkflowNode as any,
+  WebSearchNode: WorkflowNode as any,
+  MCPNode: WorkflowNode as any,
+  SetStateNode: WorkflowNode as any,
+  CustomNode: WorkflowNode as any,
+  NoteNode: WorkflowNode as any,
+  OutputNode: WorkflowNode as any,
+  ControlFlowNode: WorkflowNode as any,
+  SubworkflowNode: WorkflowNode as any,
+  ManualTriggerNode: WorkflowNode as any,
+  ScheduledTriggerNode: WorkflowNode as any,
+  IntegrationTriggerNode: WorkflowNode as any,
 }
 
 export function WorkflowCanvas() {

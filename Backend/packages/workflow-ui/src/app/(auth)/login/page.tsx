@@ -27,8 +27,8 @@ export default function LoginPage() {
 
   async function onSubmit(values: FormValues) {
     const result = await loginMutation.mutateAsync(values)
-    // Store access token + refresh token in memory
-    setAuth(result.access_token, result.refresh_token, {
+    // Store access token in memory; refresh token is set as HttpOnly cookie by server
+    setAuth(result.access_token, {
       id: result.user_id,
       email: values.email,
       name: '',

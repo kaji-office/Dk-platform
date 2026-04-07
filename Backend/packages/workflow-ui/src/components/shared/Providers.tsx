@@ -17,9 +17,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
           queries: {
             staleTime: 30_000,
             retry: (failureCount, error: unknown) => {
-              // Don't retry on 401/403/404
+              // Don't retry on 4xx or 500 (backend-confirmed errors)
               const status = (error as { response?: { status?: number } })?.response?.status
-              if (status && [401, 403, 404].includes(status)) return false
+              if (status && (status === 401 || status === 403 || status === 404 || status === 500)) return false
               return failureCount < 2
             },
           },

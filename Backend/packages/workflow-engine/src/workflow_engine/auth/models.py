@@ -15,6 +15,7 @@ class Role(str, Enum):
     """RBAC roles — ordered by privilege level (higher value = more privilege)."""
     VIEWER     = "VIEWER"
     EDITOR     = "EDITOR"
+    ADMIN      = "ADMIN"
     OWNER      = "OWNER"
     SUPERADMIN = "SUPERADMIN"
 

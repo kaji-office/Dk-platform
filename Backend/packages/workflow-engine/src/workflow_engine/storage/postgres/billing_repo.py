@@ -31,7 +31,7 @@ class PostgresBillingRepository:
         """Insert a token usage record."""
         query = """
             INSERT INTO llm_cost_records
-            (tenant_id, run_id, model_name, input_tokens, output_tokens, cost_usd)
+            (tenant_id, run_id, model, input_tokens, output_tokens, cost_usd)
             VALUES ($1, $2, $3, $4, $5, $6)
         """
         await self._pool.execute(
@@ -41,7 +41,7 @@ class PostgresBillingRepository:
             model,
             input_tokens,
             output_tokens,
-            cost_usd
+            cost_usd,
         )
 
     async def record_node_execution(
@@ -50,13 +50,13 @@ class PostgresBillingRepository:
         run_id: str,
         node_id: str,
         node_type: str,
-        duration_ms: int
+        duration_ms: int,
     ) -> None:
-        """Insert a node execution duration record."""
+        """Insert a node execution record. duration_ms is converted to compute_seconds."""
         query = """
             INSERT INTO node_exec_records
-            (tenant_id, run_id, node_id, node_type, duration_ms)
-            VALUES ($1, $2, $3, $4, $5)
+            (tenant_id, run_id, node_id, node_type, compute_seconds, started_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
         """
         await self._pool.execute(
             query,
@@ -64,7 +64,7 @@ class PostgresBillingRepository:
             run_id,
             node_id,
             node_type,
-            duration_ms
+            round(duration_ms / 1000, 3),
         )
 
     async def get_monthly_run_count(self, tenant_id: str, year: int, month: int) -> int:

@@ -18,9 +18,9 @@ import {
   type OnNodesChange,
   type OnEdgesChange,
   type OnConnect,
-} from 'reactflow'
+} from '@xyflow/react'
 import type {
-  WorkflowDefinition,
+  Workflow,
   NodeDefinition,
   EdgeDefinition,
   ExecutionStatus,
@@ -45,24 +45,25 @@ export const NODE_STATUS_STYLES: Record<NodeStatus, {
   SUSPENDED: { ring: 'ring-orange-400', dot: 'bg-orange-400', animate: 'animate-bounce' },
 }
 
-// ── Conversion: WorkflowDefinition → React Flow nodes/edges ──────────────────
-// WorkflowDefinition.nodes is a Record<string, NodeDefinition> (keyed by node_id).
+// ── Conversion: Workflow (flat API shape) → React Flow nodes/edges ────────────
+// The API returns nodes as Record<string, NodeDefinition> keyed by node_id.
 // React Flow expects Node[] with an `id` field.
+// Handles both full NodeDefinition (with ui_config) and minimal shapes.
 
-function definitionToFlow(definition: WorkflowDefinition): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = Object.entries(definition.nodes).map(([id, nodeDef]: [string, NodeDefinition]) => ({
+function workflowToFlow(workflow: Pick<Workflow, 'nodes' | 'edges'>): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = Object.entries(workflow.nodes ?? {}).map(([id, nodeDef]: [string, NodeDefinition]) => ({
     id,
-    type: nodeDef.type,          // maps to our custom node component registry
-    position: nodeDef.position,
+    type: nodeDef.type,
+    position: nodeDef.position ?? { x: 0, y: 0 },
     data: {
-      ...nodeDef.config,
+      ...(nodeDef.config ?? {}),
       ui_config: nodeDef.ui_config,
       _nodeType: nodeDef.type,
     },
   }))
 
   // Edge fields: source_node_id / target_node_id / source_port / target_port
-  const edges: Edge[] = definition.edges.map((e: EdgeDefinition) => ({
+  const edges: Edge[] = (workflow.edges ?? []).map((e: EdgeDefinition) => ({
     id: e.id,
     source: e.source_node_id,
     sourceHandle: e.source_port,
@@ -106,8 +107,8 @@ interface WorkflowStore {
   setWorkflowMeta: (id: string, name: string) => void
   markSaved: () => void
 
-  // Called by chatStore when workflow generation completes
-  loadFromDefinition: (definition: WorkflowDefinition, workflowId?: string) => void
+  // Called by chatStore when workflow generation completes, or by editor on load
+  loadFromDefinition: (workflow: Pick<Workflow, 'nodes' | 'edges'>, workflowId?: string) => void
 
   // Called by useWebSocket hook when events arrive
   applyWsEvent: (event: ExecutionWsEvent) => void
@@ -184,8 +185,8 @@ export const useWorkflowStore = create<WorkflowStore>()(
           'workflow/markSaved',
         ),
 
-      loadFromDefinition: (definition, workflowId) => {
-        const { nodes, edges } = definitionToFlow(definition)
+      loadFromDefinition: (workflow, workflowId) => {
+        const { nodes, edges } = workflowToFlow(workflow)
         set(
           {
             nodes,

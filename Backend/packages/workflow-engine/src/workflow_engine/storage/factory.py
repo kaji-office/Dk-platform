@@ -57,14 +57,24 @@ class RepositoryFactory:
         if not pg_pool:
             raise RuntimeError("Failed to initialize PostgreSQL pool")
 
-        # Create components
+        # Create components and ensure MongoDB indexes exist
+        workflows   = MongoWorkflowRepository(mongo_db)
+        executions  = MongoExecutionRepository(mongo_db)
+        schedules   = MongoScheduleRepository(mongo_db)
+        chat        = MongoConversationRepository(mongo_db)
+
+        await workflows.initialize_indexes()
+        await executions.initialize_indexes()
+        await schedules.initialize_indexes()
+        await chat.initialize_indexes()
+
         return RepositoryBundle(
-            workflows=MongoWorkflowRepository(mongo_db),
-            executions=MongoExecutionRepository(mongo_db),
-            schedules=MongoScheduleRepository(mongo_db),
+            workflows=workflows,
+            executions=executions,
+            schedules=schedules,
             users=PostgresUserRepository(pg_pool),
             tenants=PostgresTenantRepository(pg_pool),
             billing=PostgresBillingRepository(pg_pool),
             storage=S3StorageService(bucket_name=config.s3_bucket, region_name=config.aws_region),
-            chat_sessions=MongoConversationRepository(mongo_db),
+            chat_sessions=chat,
         )

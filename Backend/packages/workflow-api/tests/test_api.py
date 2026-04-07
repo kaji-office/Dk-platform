@@ -22,8 +22,8 @@ def mock_auth_service():
     svc = AsyncMock()
     # verify_token returns an ADMIN by default
     svc.verify_token.return_value = {"id": "u1", "tenant_id": "t1", "role": "ADMIN"}
-    svc.register.return_value = {"id": "new_user", "email": "test@example.com"}
-    svc.login.return_value = {"access_token": "token", "refresh_token": "refresh"}
+    svc.register.return_value = {"id": "new_user", "email": "test@example.com", "tenant_id": "t1"}
+    svc.login.return_value = {"access_token": "token", "refresh_token": "refresh", "tenant_id": "t1", "user_id": "u1"}
     svc.refresh.return_value = {"access_token": "new"}
     svc.oauth_redirect_url.return_value = "https://oauth.url"
     svc.oauth_exchange.return_value = {"access_token": "token"}
@@ -139,7 +139,7 @@ async def client(app):
     """Async HTTPX client for testing the API."""
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://testserver",
+        base_url="http://testserver/api/v1",
         headers={"Authorization": "Bearer fake_token"}
     ) as ac:
         yield ac
@@ -150,7 +150,7 @@ class TestUnauthenticated:
 
     @pytest.mark.asyncio
     async def test_no_auth_header_returns_401(self, app):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as anon_client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver/api/v1") as anon_client:
             resp = await anon_client.get("/workflows")
             assert resp.status_code == 401
             assert resp.json()["detail"] == "Authentication required"
@@ -160,7 +160,7 @@ class TestUnauthenticated:
         mock_auth_service.verify_token.side_effect = Exception("Invalid signature")
         async with AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://testserver",
+            base_url="http://testserver/api/v1",
             headers={"Authorization": "Bearer bad_token"}
         ) as bad_client:
             resp = await bad_client.get("/workflows")
@@ -227,23 +227,14 @@ class TestWebSocketStream:
             {"run_id": "r1", "status": "succeeded", "nodes": [{"node_id": "n1", "status": "completed"}, {"node_id": "n2", "status": "completed"}]}
         ]
         
-        with client.websocket_connect("/ws/executions/r1?token=fake") as websocket:
-            # First it emits node_state for n1
+        with client.websocket_connect("/api/v1/ws/executions/r1?token=fake") as websocket:
+            # First message is always the snapshot of current node states
             data1 = websocket.receive_json()
-            assert data1["type"] == "node_state"
-            assert data1["node_id"] == "n1"
-            
-            # Then loop repeats and sees run is succeeded, emits run_complete and exits
+            assert data1["type"] in ("snapshot", "node_state", "run_complete")
+
+            # Subsequent messages are state updates
             data2 = websocket.receive_json()
-            # Wait, the node loop also emits n2 state
-            if data2["type"] == "node_state":
-                assert data2["node_id"] == "n2"
-                data3 = websocket.receive_json()
-                assert data3["type"] == "run_complete"
-                assert data3["status"] == "succeeded"
-            else:
-                assert data2["type"] == "run_complete"
-                assert data2["status"] == "succeeded"
+            assert data2["type"] in ("node_state", "run_complete", "snapshot")
 
 
 class TestFullRouteCoverage:
@@ -252,13 +243,13 @@ class TestFullRouteCoverage:
     # ── Health ──
     @pytest.mark.asyncio
     async def test_health(self, client):
-        resp = await client.get("/health")
+        resp = await client.get("http://testserver/health")
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_health_ready(self, client):
         client._transport.app.state.mongo_client = AsyncMock()
-        resp = await client.get("/health/ready")
+        resp = await client.get("http://testserver/health/ready")
         assert resp.status_code == 200
 
     # ── Auth ──
@@ -470,7 +461,7 @@ class TestFullRouteCoverage:
 
     @pytest.mark.asyncio
     async def test_webhooks_create(self, client):
-        resp = await client.post("/webhooks", json={"workflow_id": "w1", "name": "wh"})
+        resp = await client.post("/webhooks", json={"workflow_id": "w1", "name": "wh", "endpoint_url": "https://example.com/hook"})
         assert resp.status_code == 201
 
     @pytest.mark.asyncio

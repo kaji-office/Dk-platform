@@ -6,7 +6,7 @@
 //   - Refresh token (7 days): HttpOnly cookie — invisible to JS, sent automatically
 //   - On 401: interceptor calls POST /auth/token/refresh → retries original request
 //   - On 429: shows toast and does NOT auto-retry (per handover doc §12)
-// ─────────────────────────────────────────────────────────────────────────────--
+// ─────────────────────────────────────────────────────────────────────────────
 
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 
@@ -73,22 +73,14 @@ apiClient.interceptors.response.use(
 
       isRefreshing = true
       try {
-        // Read stored refresh token and send in body (backend requires it)
-        const { getRefreshToken, setAccessToken } = require('@/stores/authStore').useAuthStore.getState()
-        const storedRefreshToken = getRefreshToken()
-
-        if (!storedRefreshToken) {
-          throw new Error('No refresh token available')
-        }
-
-        // POST /auth/token/refresh — send refresh_token in body
+        // POST /auth/token/refresh — cookie is sent automatically (withCredentials)
         const { data } = await apiClient.post<{ data: { access_token: string } }>(
           '/api/v1/auth/token/refresh',
-          { refresh_token: storedRefreshToken },
         )
         const newToken = data.data.access_token
 
         // Store new token in authStore
+        const { setAccessToken } = require('@/stores/authStore').useAuthStore.getState()
         setAccessToken(newToken)
 
         // Flush queued requests

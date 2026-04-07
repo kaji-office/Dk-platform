@@ -19,6 +19,7 @@ class NodeExecutionState(BaseModel):
     ended_at: datetime | None = None
     error: str | None = None
     outputs: dict[str, Any] = Field(default_factory=dict)
+    logs: list[str] = Field(default_factory=list, description="Structured log lines emitted during node execution")
 
 class ExecutionRun(BaseModel):
     run_id: str = Field(..., description="Execution run ID")
@@ -31,3 +32,5 @@ class ExecutionRun(BaseModel):
     error: str | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    celery_task_id: str | None = Field(default=None, description="Celery AsyncResult task ID for cancellation")
+    retry_of: str | None = Field(default=None, description="Original run_id this run is a retry of")

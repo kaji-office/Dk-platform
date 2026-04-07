@@ -11,8 +11,8 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # ── Sentinel user roles ───────────────────────────────────────────────────────
-ROLES_WRITE = {"OWNER", "EDITOR"}
-ROLES_READ  = {"OWNER", "EDITOR", "VIEWER"}
+ROLES_WRITE = {"OWNER", "EDITOR", "ADMIN"}
+ROLES_READ  = {"OWNER", "EDITOR", "VIEWER", "ADMIN"}
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -82,8 +82,8 @@ def require_role(*allowed_roles: str) -> Any:
 
 
 # Convenience shorthands
-RequireWrite = require_role("OWNER", "EDITOR")
-RequireAdmin = require_role("OWNER")
+RequireWrite = require_role("OWNER", "EDITOR", "ADMIN")
+RequireAdmin = require_role("OWNER", "ADMIN")
 
 
 def get_tenant_id(user: CurrentUser) -> str:

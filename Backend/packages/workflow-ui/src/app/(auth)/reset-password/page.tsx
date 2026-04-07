@@ -1,5 +1,6 @@
 'use client'
 
+import { Suspense } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -14,17 +15,19 @@ const schema = z.object({
   path: ['confirm'],
 })
 
-export default function ResetPasswordPage() {
+function ResetPasswordContent() {
   const params = useSearchParams()
   const token = params.get('token') ?? ''
   const router = useRouter()
   const mutation = usePasswordReset()
 
-  const { register, handleSubmit, formState: { errors } } = useForm({
+  type FormValues = { new_password: string; confirm: string }
+
+  const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(schema),
   })
 
-  async function onSubmit({ new_password }: { new_password: string; confirm: string }) {
+  async function onSubmit({ new_password }: FormValues) {
     await mutation.mutateAsync({ token, new_password })
     router.push('/login?reset=1')
   }
@@ -45,8 +48,8 @@ export default function ResetPasswordPage() {
             type="password"
             className="mt-1 w-full rounded-md border border-input px-3 py-2 text-sm"
           />
-          {errors.new_password && (
-            <p className="text-xs text-destructive mt-1">{errors.new_password.message}</p>
+          {errors.new_password?.message && (
+            <p className="text-xs text-destructive mt-1">{errors.new_password.message as string}</p>
           )}
         </div>
         <div>
@@ -56,8 +59,8 @@ export default function ResetPasswordPage() {
             type="password"
             className="mt-1 w-full rounded-md border border-input px-3 py-2 text-sm"
           />
-          {errors.confirm && (
-            <p className="text-xs text-destructive mt-1">{errors.confirm.message}</p>
+          {errors.confirm?.message && (
+            <p className="text-xs text-destructive mt-1">{errors.confirm.message as string}</p>
           )}
         </div>
         <button
@@ -69,5 +72,13 @@ export default function ResetPasswordPage() {
         </button>
       </form>
     </div>
+  )
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
+      <ResetPasswordContent />
+    </Suspense>
   )
 }

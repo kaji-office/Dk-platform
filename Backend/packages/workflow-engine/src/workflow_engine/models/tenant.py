@@ -10,6 +10,7 @@ class PlanTier(StrEnum):
     ENTERPRISE = "ENTERPRISE"
 
 class PIIPolicy(StrEnum):
+    DISABLED = "DISABLED"
     SCAN_WARN = "SCAN_WARN"
     SCAN_MASK = "SCAN_MASK"
     SCAN_BLOCK = "SCAN_BLOCK"

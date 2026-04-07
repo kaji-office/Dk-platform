@@ -2,16 +2,18 @@
 // Executions API — TanStack Query hooks + polling for Celery async jobs
 //
 // Celery job flow:
-//   1. POST /workflows/{id}/trigger  → returns { run_id }
+//   1. POST /workflows/{id}/trigger  → 202 { run_id, status: 'queued' }
 //   2. Connect to WS /ws/executions/{run_id}?token=<jwt> for live events
-//   3. Poll GET /executions/{run_id} as fallback when WS is unavailable
-//   4. GET /executions/{run_id}/nodes for per-node states
-//   5. GET /executions/{run_id}/logs for log stream
+//   3. Poll GET /executions/{run_id} as fallback (node_states is embedded)
+//   4. GET /executions/{run_id}/logs  → { logs: [], run_id }
+//
+// NOTE: /executions/{run_id}/nodes returns 500 in current backend.
+//       Use run.node_states from the run detail instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiClient } from './client'
-import type { ExecutionRun, NodeExecution, ExecutionLog, ApiResponse } from '@/types/api'
+import type { ExecutionRun, ExecutionLog, NodeExecution, ApiResponse } from '@/types/api'
 
 // ── Query keys ────────────────────────────────────────────────────────────────
 
@@ -20,7 +22,6 @@ export const executionKeys = {
   list: (filters?: Record<string, string>) =>
     [...executionKeys.all, 'list', filters ?? {}] as const,
   detail: (runId: string) => [...executionKeys.all, 'detail', runId] as const,
-  nodes: (runId: string) => [...executionKeys.all, 'nodes', runId] as const,
   logs: (runId: string) => [...executionKeys.all, 'logs', runId] as const,
 }
 
@@ -30,11 +31,11 @@ export function useExecutions(filters?: { workflow_id?: string; status?: string 
   return useQuery({
     queryKey: executionKeys.list(filters),
     queryFn: async () => {
-      // Backend returns { executions: ExecutionRun[], skip, limit }
-      const { data } = await apiClient.get<{ executions: ExecutionRun[]; skip: number; limit: number }>('/api/v1/executions', {
-        params: filters,
-      })
-      return data.executions ?? []
+      const { data } = await apiClient.get<ApiResponse<{ executions: ExecutionRun[] }>>(
+        '/api/v1/executions',
+        { params: filters },
+      )
+      return data.data.executions
     },
   })
 }
@@ -55,15 +56,10 @@ export function useExecution(runId: string) {
 }
 
 // ── Poll active run — fallback when WebSocket is unavailable ──────────────────
-// Refetches every `intervalMs` while run is in a non-terminal state.
-// Stop polling by setting enabled=false once WebSocket connects.
 
 export function usePollExecution(
   runId: string,
-  {
-    enabled = true,
-    intervalMs = 2000,
-  }: { enabled?: boolean; intervalMs?: number } = {},
+  { enabled = true, intervalMs = 2000 }: { enabled?: boolean; intervalMs?: number } = {},
 ) {
   return useQuery({
     queryKey: executionKeys.detail(runId),
@@ -76,26 +72,35 @@ export function usePollExecution(
     enabled: Boolean(runId) && enabled,
     refetchInterval: (query) => {
       const status = query.state.data?.status
-      // Stop polling when run reaches a terminal state
       const terminal = ['SUCCESS', 'FAILED', 'CANCELLED']
       return terminal.includes(status ?? '') ? false : intervalMs
     },
   })
 }
 
-// ── Per-node execution states ─────────────────────────────────────────────────
+// ── Node states — derived from embedded run.node_states ───────────────────────
+// The /executions/{run_id}/nodes endpoint is unreliable; use run detail instead.
 
 export function useExecutionNodes(runId: string) {
   return useQuery({
-    queryKey: executionKeys.nodes(runId),
+    queryKey: executionKeys.detail(runId),  // same cache key as run detail
     queryFn: async () => {
-      // Backend returns { nodes: NodeExecution[] }
-      const { data } = await apiClient.get<{ nodes: NodeExecution[] }>(
-        `/api/v1/executions/${runId}/nodes`,
+      const { data } = await apiClient.get<ApiResponse<ExecutionRun>>(
+        `/api/v1/executions/${runId}`,
       )
-      return data.nodes ?? []
+      return data.data
     },
     enabled: Boolean(runId),
+    select: (run) =>
+      // Convert node_states Record → NodeExecution[]
+      Object.entries(run.node_states ?? {}).map(([node_id, state]) => ({
+        node_id,
+        status: state.status,
+        started_at: state.started_at,
+        ended_at: state.ended_at,
+        error: state.error,
+        outputs: state.outputs,
+      } satisfies NodeExecution)),
   })
 }
 
@@ -105,11 +110,10 @@ export function useExecutionLogs(runId: string) {
   return useQuery({
     queryKey: executionKeys.logs(runId),
     queryFn: async () => {
-      // Backend returns { logs: ExecutionLog[], run_id: string }
-      const { data } = await apiClient.get<{ logs: ExecutionLog[]; run_id: string }>(
+      const { data } = await apiClient.get<ApiResponse<{ logs: ExecutionLog[]; run_id: string }>>(
         `/api/v1/executions/${runId}/logs`,
       )
-      return data.logs ?? []
+      return data.data.logs
     },
     enabled: Boolean(runId),
   })

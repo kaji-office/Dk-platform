@@ -19,111 +19,81 @@ They contain **zero** workflow logic. Any business rule that could be needed by 
 ### Responsibility
 HTTP/WebSocket gateway. Authenticates requests, delegates all logic to SDK, dispatches executions to Celery.
 
-### Project Structure
+### As-Built Project Structure
+
+> **Note:** The current implementation uses a lean monolithic structure. All platform services (`PlatformAuthService`, `PlatformWorkflowService`, `PlatformExecutionService`, `PlatformScheduleService`, `PlatformAuditService`, etc.) are defined in `main.py` alongside the FastAPI lifespan. Routes are split into separate files under `routes/`.
+
 ```
 packages/workflow-api/
-├── pyproject.toml          # depends on: workflow-engine, fastapi, uvicorn, celery
+├── pyproject.toml          # depends on: workflow-engine, fastapi, uvicorn, celery, slowapi
 └── src/workflow_api/
-    ├── main.py             # FastAPI app + lifespan + exception handler
-    ├── dependencies.py     # All FastAPI Depends() providers
-    ├── settings.py         # API-level settings (port, CORS origins, etc.)
+    ├── main.py             # FastAPI app + lifespan + ALL platform service classes
+    │                       # PlatformAuthService, PlatformWorkflowService,
+    │                       # PlatformExecutionService, PlatformScheduleService,
+    │                       # PlatformAuditService (write() + list()), PlatformWebhookService,
+    │                       # PlatformBillingService, PlatformUserService
+    ├── app.py              # Rate limiter setup (SlowAPI, storage_uri=REDIS_URL)
+    ├── dependencies.py     # CurrentUser, TenantId, RequireWrite Depends() providers
     │
-    ├── auth/
-    │   ├── jwt.py          # RS256 JWT validation + claims extraction
-    │   ├── api_key.py      # SHA-256 hash lookup in PostgreSQL
-    │   ├── oauth.py        # Google / GitHub / Microsoft OAuth2 flows
-    │   ├── sso.py          # SAML/OIDC enterprise SSO
-    │   └── middleware.py   # Auth middleware (runs before route handlers)
-    │
-    ├── middleware/
-    │   ├── request_id.py   # Inject X-Request-ID header
-    │   ├── tracing.py      # AWS X-Ray root span creation
-    │   ├── logging.py      # Structured JSON log per request (PII-masked)
-    │   ├── cors.py         # CORS configuration
-    │   ├── tenant.py       # JWT/API key → Tenant → EngineConfig injection
-    │   ├── rate_limit.py   # Redis per-tenant RPM enforcement
-    │   └── semaphore.py    # Concurrent execution limit per tenant
-    │
-    ├── routes/
-    │   ├── health.py       # GET /health · /readyz · /livez
-    │   ├── auth.py         # POST /auth/login · /signup · /refresh · /logout
-    │   ├── oauth.py        # GET /auth/oauth/{provider} · /callback
-    │   ├── workflows.py    # CRUD + duplicate
-    │   ├── executions.py   # trigger + status + cancel + retry + nodes
-    │   ├── versions.py     # list + get + diff + rollback
-    │   ├── nodes.py        # list types + schema
-    │   ├── schedules.py    # CRUD schedules
-    │   ├── webhooks.py     # inbound webhook receiver
-    │   ├── logs.py         # paginated logs + SSE stream
-    │   ├── templates.py    # workflow template gallery
-    │   ├── settings.py     # profile · team · integrations · billing
-    │   ├── api_keys.py     # list + create + revoke
-    │   └── admin.py        # tenant management (platform admin only)
-    │
-    └── websocket/
-        ├── hub.py          # Redis Pub/Sub → WebSocket fan-out
-        └── events.py       # WsEvent serializer → JSON
+    └── routes/
+        ├── health.py       # GET /health · /readyz · /livez
+        ├── auth.py         # POST /auth/register · /login · /logout · /token/refresh
+        │                   # + email verify, password reset, MFA, OAuth
+        ├── users.py        # GET/PATCH /users/me · /users
+        ├── workflows.py    # CRUD + activate/deactivate + versions + schedules
+        │                   # Audit writes: workflow.created, workflow.deleted, schedule.created
+        ├── executions.py   # trigger + list + get + cancel + retry + nodes + logs
+        │                   # Audit write: execution.triggered
+        ├── chat.py         # POST /chat · WS /chat/ws (Redis PubSub streaming)
+        ├── webhooks.py     # GET/POST/DELETE /webhooks + inbound receiver + GET /audit
+        └── __pycache__/
 ```
 
 ### Middleware Stack (request order)
 ```
 Request
-  → RequestIDMiddleware        inject X-Request-ID
-  → XRayTracingMiddleware      create root AWS X-Ray segment
-  → StructuredLoggingMiddleware JSON log (PII fields masked)
-  → CORSMiddleware             configured origins
-  → TenantContextMiddleware    JWT/API key → Tenant → EngineConfig
-  → RateLimitMiddleware        Redis per-tenant RPM counter
+  → RequestIDMiddleware         inject X-Request-ID + success/error response wrapper
+  → CORSMiddleware              configured origins
+  → SlowAPI RateLimitMiddleware Redis per-tenant RPM counter (storage_uri=REDIS_URL)
+  → JWT/API key auth            CurrentUser + TenantId Depends() resolved per route
   → Route Handler
 Response
-  → GZipMiddleware
+  → Structured JSON: {success, request_id, data} or {success, request_id, error, message}
 ```
 
-### Key Routes
+### Key Routes (as-built)
 
-| Route | Method | SDK Calls | Notes |
-|---|---|---|---|
-| `POST /auth/login` | POST | `engine.auth.token` | Returns access + refresh tokens |
-| `POST /auth/signup` | POST | `engine.auth.password` | Email verification required |
-| `POST /api/v2/workflows` | POST | `validation.validate()` · `versioning.create_version()` | 422 if invalid |
-| `POST /api/v2/executions` | POST | `billing.quota_checker` · `versioning.pin_for_execution()` | Dispatches to Celery |
-| `DELETE /api/v2/executions/{id}/cancel` | POST | `state.transition_run(CANCELLED)` | Sends Celery revoke |
-| `WS /api/v2/ws/runs/{id}` | WS | Redis Pub/Sub subscriber | Real-time node status |
-| `GET /api/v2/logs/stream` | GET (SSE) | MongoDB tail cursor | Streaming log output |
-| `GET /health` | GET | `engine.health.checker.check_all()` | K8s liveness probe |
+| Route | Method | Notes |
+|---|---|---|
+| `POST /api/v1/auth/register` | POST | Creates user + tenant; returns `user_id`, `email`; writes `auth.register` audit event |
+| `POST /api/v1/auth/login` | POST | Returns `access_token`, `refresh_token`, `user_id`, `tenant_id`; writes `auth.login` audit event |
+| `POST /api/v1/workflows` | POST | Creates workflow; writes `workflow.created` audit event |
+| `DELETE /api/v1/workflows/{id}` | DELETE | Writes `workflow.deleted` audit event |
+| `POST /api/v1/workflows/{id}/trigger` | POST | Creates `ExecutionRun`, dispatches `execute_workflow` to Celery; writes `execution.triggered` audit event |
+| `WS /ws/chat` | WS | Redis PubSub streaming chat |
+| `GET /api/v1/audit` | GET | Returns tenant-scoped audit events from MongoDB `audit_log` collection |
+| `GET /health` | GET | Returns `{status: ok, service: workflow-api}` |
 
-### Lifespan Management
+### Lifespan Management (as-built)
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # STARTUP
-    app.state.mongo = AsyncIOMotorClient(settings.MONGODB_URL)
-    app.state.pg_pool = await asyncpg.create_pool(settings.POSTGRES_URL, min_size=5, max_size=20)
-    app.state.redis = await aioredis.from_url(settings.REDIS_URL, max_connections=10)
-    app.state.node_registry = NodeTypeRegistry.get_instance()
-    asyncio.create_task(websocket_hub.start_subscriber())
+    # STARTUP — reads env vars directly (no settings object)
+    mongo_client = AsyncIOMotorClient(MONGODB_URL)
+    pg_pool = await asyncpg.create_pool(POSTGRES_URL_ASYNCPG)
+    redis_client = redis.from_url(REDIS_URL)  # redis[asyncio]
+    # Injects services into app.state:
+    # auth_service, workflow_service, execution_service, schedule_service,
+    # audit_service, webhook_service, billing_service, user_service
     yield
-    # SHUTDOWN
-    app.state.mongo.close()
-    await app.state.pg_pool.close()
-    await app.state.redis.close()
-    websocket_hub.stop()
+    # SHUTDOWN — closes all connections
 ```
 
-### Global Exception Handler
-```python
-@app.exception_handler(EngineError)
-async def engine_error_handler(request: Request, exc: EngineError) -> JSONResponse:
-    return JSONResponse(
-        status_code=exc.http_status_code,
-        content=ErrorResponse(
-            error=type(exc).__name__,
-            message=str(exc),
-            request_id=request.headers.get("X-Request-ID"),
-            validation_errors=getattr(exc, "errors", None),
-        ).model_dump(),
-    )
-```
+### Auth implementation (as-built)
+- Access token: RS256 JWT, 15 min TTL, stored in React memory
+- Refresh token: HMAC-HS256 JWT, 7 day TTL — stored in DB (not opaque SHA-256)
+- **Logout is a no-op** in v1 — token still valid until expiry; JTI blocklist deferred
+- Rate limit: SlowAPI 60 req/min per tenant, Redis-backed (`LIMITS:LIMITER/*` keyspace)
 
 ---
 
@@ -132,68 +102,78 @@ async def engine_error_handler(request: Request, exc: EngineError) -> JSONRespon
 ### Responsibility
 Consumes tasks from Redis queues. Calls `RunOrchestrator.run()` from the SDK. Zero workflow logic of its own.
 
-### Project Structure
+### As-Built Project Structure
+
+> **Note:** All tasks are in a single `tasks.py` file, not a `tasks/` directory.
+
 ```
 packages/workflow-worker/
 ├── pyproject.toml          # depends on: workflow-engine, celery, redis
 └── src/workflow_worker/
-    ├── celery_app.py       # Celery app config + queue definitions
-    ├── signals.py          # Worker startup/shutdown hooks
-    │
-    └── tasks/
-        ├── orchestrator.py   # orchestrate_run — main execution task
-        ├── node_runner.py    # execute_single_node — parallel branch execution
-        ├── cleanup.py        # cleanup_run — post-execution housekeeping
-        ├── scheduler.py      # scheduler_fire_cron — beat task
-        ├── human_callback.py # handle_human_callback — resume HumanNode
-        ├── notifications.py  # send_notification — post-run alerts
-        └── export.py         # export_workflow_bundle — ZIP export to S3
+    ├── celery_app.py       # Celery app config + queue definitions + beat schedule
+    ├── dependencies.py     # get_engine() — builds SDK repository bundle
+    └── tasks.py            # All Celery tasks in one file:
+                            #   execute_workflow — main execution entry point
+                            #   execute_node     — single node retry/offload
+                            #   fire_schedule    — beat task (every 30s)
+                            #                      dispatches execute_workflow per due schedule
+                            #   send_notification
+                            #   handle_dlq       — dead-letter handler
 ```
 
-### Queue Configuration
+### Queue Configuration (as-built)
 ```python
-# workflow-worker/celery_app.py
+# celery_app.py
 
 app = Celery("workflow_worker")
-app.config_from_object({
-    "broker_url": settings.REDIS_URL,
-    "result_backend": settings.REDIS_URL,
-    "task_routes": {
-        "tasks.orchestrator.orchestrate_run":       {"queue": "default"},
-        "tasks.node_runner.execute_single_node":    {"queue": "ai-heavy"},
-        "tasks.cleanup.cleanup_run":                {"queue": "default"},
-        "tasks.human_callback.handle_human_callback": {"queue": "critical"},
-        "tasks.scheduler.scheduler_fire_cron":      {"queue": "scheduled"},
-        "tasks.notifications.send_notification":    {"queue": "default"},
+app.conf.update(
+    broker_url=CELERY_BROKER_URL,          # Redis DB0
+    result_backend=CELERY_RESULT_BACKEND,  # Redis DB1, ~8h TTL
+    task_routes={
+        "workflow_worker.tasks.execute_workflow": {"queue": "default"},
+        "workflow_worker.tasks.execute_node":     {"queue": "ai-heavy"},
+        "workflow_worker.tasks.fire_schedule":    {"queue": "scheduled"},
+        "workflow_worker.tasks.send_notification":{"queue": "default"},
     },
-    "task_acks_late": True,
-    "task_reject_on_worker_lost": True,
-    "worker_prefetch_multiplier": 1,     # one task at a time per worker process
-    "task_soft_time_limit": 300,         # SoftTimeLimitExceeded after 5 min
-    "task_time_limit": 360,              # SIGKILL after 6 min
-})
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
+    beat_schedule={
+        "fire-schedules": {
+            "task": "workflow_worker.tasks.fire_schedule",
+            "schedule": 30.0,          # every 30 seconds (not every minute)
+            "options": {"queue": "scheduled"},
+        },
+    },
+)
 ```
 
-### Core Task: orchestrate_run
+### Core Task: execute_workflow (as-built)
 ```python
-@app.task(bind=True, max_retries=0, queue="default")
-def orchestrate_run(self, run_id: str, definition_dict: dict, trace_ctx: dict) -> None:
-    """Entry point from API into execution engine."""
-    config = EngineConfig.from_run_context(run_id)  # loads tenant config
-    extract_trace_context(trace_ctx)                # continue API trace
+@app.task(bind=True, autoretry_for=TRANSIENT_ERRORS, retry_kwargs={"max_retries": 3},
+          name="workflow_worker.tasks.execute_workflow")
+def execute_workflow(self, run_id: str, tenant_id: str, workflow_id: str | None = None, ...):
+    """Loads run from DB, loads workflow def, calls RunOrchestrator.run()."""
+    sdk = run_async(get_engine())
+    run = run_async(sdk["execution_repo"].get(tenant_id, run_id))
+    workflow = run_async(sdk["workflow_repo"].get(tenant_id, run.workflow_id))
+    run_async(sdk["orchestrator"].run(
+        workflow_def=workflow, run_id=run_id, tenant_id=tenant_id,
+        trigger_input=run.input_data,   # input_data from DB — authoritative
+    ))
+```
 
-    orchestrator = RunOrchestrator(config)
-    definition = WorkflowDefinition.model_validate(definition_dict)
-
-    try:
-        asyncio.run(orchestrator.run(run_id, definition))
-    except Exception as exc:
-        # DLQ — all retries exhausted (max_retries=0 means no retry at task level;
-        # retry is handled inside RunOrchestrator per node)
-        write_to_dlq(self.request.id, {"run_id": run_id}, exc)
-        raise
-    finally:
-        cleanup_run.delay(run_id)
+### Beat Task: fire_schedule (as-built)
+```python
+@app.task(bind=True, name="workflow_worker.tasks.fire_schedule")
+def fire_schedule(self):
+    """Runs every 30s. Finds due schedules, dispatches execute_workflow per schedule."""
+    service = SchedulerService(sdk["scheduler"])
+    fired = run_async(service.tick())
+    for schedule in fired:
+        run = ExecutionRun(..., input_data=schedule.input_data)  # uses schedule.input_data
+        run_async(sdk["execution_repo"].create(tenant_id, run))
+        execute_workflow.delay(run_id, tenant_id, workflow_id)
 ```
 
 ---
@@ -214,28 +194,25 @@ spec:
     type: Recreate     # Never RollingUpdate — would briefly have 2 instances
 ```
 
-### Beat Schedule
+### Beat Schedule (as-built)
+
+> **As-built:** Beat fires a single `fire_schedule` task every **30 seconds** (not every minute). Cleanup tasks (semaphore purge, retention) are deferred to a future sprint.
+
 ```python
-app.conf.beat_schedule = {
-    "fire-cron-triggers": {
-        "task": "tasks.scheduler.scheduler_fire_cron",
-        "schedule": crontab(minute="*"),    # every minute
+# celery_app.py — beat_schedule
+{
+    "fire-schedules": {
+        "task": "workflow_worker.tasks.fire_schedule",
+        "schedule": 30.0,          # every 30s via PersistentScheduler
         "options": {"queue": "scheduled"},
-    },
-    "cleanup-stale-semaphores": {
-        "task": "tasks.cleanup.cleanup_stale_semaphores",
-        "schedule": crontab(minute="*/5"),  # every 5 min
-    },
-    "purge-expired-context-keys": {
-        "task": "tasks.cleanup.purge_expired_context",
-        "schedule": crontab(hour="*"),      # every hour
-    },
-    "enforce-retention-policy": {
-        "task": "tasks.cleanup.enforce_retention",
-        "schedule": crontab(hour=2, minute=0),  # daily at 02:00 UTC
     },
 }
 ```
+
+`fire_schedule` calls `SchedulerService.tick()` which queries MongoDB for documents where `is_active=True AND next_fire_at <= now`. For each due schedule it:
+1. Creates an `ExecutionRun` with `input_data=schedule.input_data`
+2. Dispatches `execute_workflow.delay(run_id, tenant_id, workflow_id)`
+3. Advances `next_fire_at` to the next cron occurrence
 
 ---
 

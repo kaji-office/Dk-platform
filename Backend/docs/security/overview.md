@@ -20,24 +20,29 @@
 ### Token Architecture
 
 ```
-Sign-up / Login → POST /auth/login
+Sign-up / Login → POST /api/v1/auth/login
          │
          ▼
-engine.auth.token.TokenGenerator.generate_pair(user_id, tenant_id)
+PlatformAuthService.login() — PostgreSQL lookup, bcrypt verify
          │
          ├── Access Token (JWT RS256)
-         │   Payload: { sub, tenant_id, email, role, plan, isolation_tier, exp (+15min), jti }
+         │   Payload: { sub, tid, roles, type, iss, aud, iat, exp (+15min), jti }
          │   Stored:  React memory state (NEVER localStorage, NEVER cookie)
          │   Used on: every API request — Authorization: Bearer {token}
          │
-         └── Refresh Token (opaque, SHA-256 stored in PostgreSQL)
-             Stored:  HttpOnly, Secure, SameSite=Strict cookie (7 day TTL)
-             Used on: POST /auth/refresh only
-             Rotation: single-use — each refresh issues a new refresh token
+         └── Refresh Token (JWT HMAC-HS256, 7 day TTL)
+             Stored:  returned in response body — client stores in memory or HttpOnly cookie
+             Used on: POST /auth/token/refresh only
+             Rotation: issues a new pair on each refresh call
 
 Auto-refresh:
-  Axios interceptor detects 401 → POST /auth/refresh → new access token in memory
+  Axios interceptor detects 401 → POST /auth/token/refresh → new access token in memory
   If refresh fails (expired/revoked) → redirect to /login
+
+Login response also returns: user_id, tenant_id (for client-side context setup)
+
+⚠️ As-built limitation: POST /auth/logout is a no-op — access token remains valid until
+   natural 15-min expiry. JTI Redis blocklist deferred to v1.1.
 ```
 
 ### API Key Authentication
@@ -185,7 +190,43 @@ Generated automatically on ENTERPRISE signup. Stored in PostgreSQL with acceptan
 
 ---
 
-## 4. SOC 2 Type II Controls
+## 4. Audit Log
+
+### As-Built Implementation
+
+Audit events are written to MongoDB `audit_log` collection via `PlatformAuditService.write()`.
+
+**Events currently wired:**
+
+| Event type | Trigger |
+|---|---|
+| `auth.register` | `POST /auth/register` — success |
+| `auth.login` | `POST /auth/login` — success |
+| `workflow.created` | `POST /workflows` — success |
+| `workflow.deleted` | `DELETE /workflows/{id}` — success |
+| `execution.triggered` | `POST /workflows/{id}/trigger` — success |
+| `schedule.created` | `POST /workflows/{id}/schedules` — success |
+
+**Audit document schema:**
+```json
+{
+  "tenant_id": "...",
+  "event_type": "workflow.created",
+  "user_id": "...",
+  "resource_type": "workflow",
+  "resource_id": "...",
+  "detail": { "name": "My Workflow" },
+  "created_at": "2026-04-02T08:07:13Z"
+}
+```
+
+**Query:** `GET /api/v1/audit` — returns events sorted by `created_at` desc, tenant-scoped.
+
+**Deferred events** (v1.1): workflow.updated, execution.completed, execution.failed, user.invited, api_key.created, api_key.revoked, gdpr.erasure.
+
+---
+
+## 5. SOC 2 Type II Controls
 
 ### CC6 — Logical Access Controls
 - All API endpoints require authentication (no public routes except `/health`, `/auth/*`)

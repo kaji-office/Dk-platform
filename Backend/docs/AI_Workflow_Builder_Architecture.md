@@ -192,7 +192,7 @@ The platform is organized into **5 distinct layers**. Understanding which layer 
 ║  LAYER 2 — SDK DEPENDENCIES  (pip packages the SDK itself depends on)        ║
 ║  The SDK is allowed to depend ONLY on these. No web frameworks.              ║
 ║                                                                              ║
-║   pydantic-v2   httpx   motor(async-mongo)   aioredis   tiktoken            ║
+║   pydantic-v2   httpx   motor(async-mongo)   redis[asyncio]   tiktoken            ║
 ║   RestrictedPython   presidio-analyzer   google-cloud-storage               ║
 ║   asyncpg(pgvector)   mcp-sdk   authlib                                     ║
 ║                                                                              ║
@@ -1784,7 +1784,7 @@ def test_validation_rejects_cycle():
 | **@workflow/react** | React, TypeScript, React Flow | Embeddable components npm package |
 | **Providers** | Vertex AI SDK, Anthropic SDK, OpenAI SDK | LLM access (inside SDK providers module) |
 | **Integrations** | MCP SDK, authlib (OAuth2), aiohttp | External connections (inside SDK integrations module) |
-| **Storage** | MongoDB (motor), PostgreSQL + pgvector (asyncpg), Redis (aioredis), GCS (google-cloud-storage) | Persistence |
+| **Storage** | MongoDB (motor), PostgreSQL + pgvector (asyncpg), Redis (redis[asyncio]), GCS (google-cloud-storage) | Persistence |
 | **Infra** | Docker, Kubernetes (GKE), Terraform, OpenTelemetry, Prometheus, Grafana | Deployment + observability |
 | **Testing** | pytest, testcontainers, Locust, Pact, OWASP ZAP, Snyk | Quality assurance |
 

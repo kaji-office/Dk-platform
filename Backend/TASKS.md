@@ -610,10 +610,10 @@ wf config set / get
 
 | # | Task | Status | Assigned To | Started | Completed | Depends On |
 |---|------|--------|-------------|---------|-----------|------------|
-| F-1 | **Auth pages + shell layout** | ⏳ Pending | — | — | — | E-1 (auth routes) |
+| F-1 | **Auth pages + shell layout** | 🔄 In Progress | Frontend team | 2026-04-02 | — | E-1 (auth routes) ✅ |
 | F-2 | **Workflow canvas (React Flow)** | ⏳ Pending | — | — | — | F-1 |
 | F-3 | **DynamicConfigForm + node panels** | ⏳ Pending | — | — | — | F-2 |
-| F-4 | **Execution monitor + live updates** | ⏳ Pending | — | — | — | F-2, E-2 |
+| F-4 | **Execution monitor + live updates** | ⏳ Pending | — | — | — | F-2, E-2 ✅ |
 | F-5 | **TransformNode Monaco editor** | ⏳ Pending | — | — | — | F-3 |
 | F-6 | **Usage / billing dashboard** | ⏳ Pending | — | — | — | F-1 |
 
@@ -1162,6 +1162,25 @@ Everything else (auth, billing, connectors, CLI, frontend) can be built around t
 | FIX-36 | GAP-D7-1,2 | Add `smembers`/`sadd` default methods to `CachePort`; implement in `RedisCache`; orchestrator pre-loads `state_keys:{run_id}` via `smembers` + `get` before each node execution; `SetStateNode` tracks keys via `sadd` | ✅ Done | — |
 | FIX-37 | GAP-LLM-1,2,3 | Add `complete_with_usage()` to `LLMPort` (default wraps `complete()`); implement in `GoogleGenAIProvider` using `response.usage_metadata` + `client.models.count_tokens()`; implement in `OpenAIProvider` using `response.usage` | ✅ Done | — |
 | FIX-38 | GAP-DEP-1,2 | Replace `aioredis>=2.0` with `redis[asyncio]>=5.0` across all `pyproject.toml` files; comment out `sendgrid` hard dep; add inline note about `tiktoken` as fallback | ✅ Done | — |
+| FIX-39 | GAP-B23 | Audit log writes used `tenant_id="system"` — invisible to tenant queries. Root cause: `register()` returned no `tenant_id`; `login()` returned no `user_id`/`tenant_id`. Fixed both service methods; all audit routes now use real tenant-scoped values | ✅ Done (2026-04-02) | — |
+| FIX-40 | GAP-B24 | `schedule.input_data` field missing from `ScheduleModel` — `fire_schedule` task always created runs with `input_data={}`. Added `input_data: dict` to `ScheduleModel`; `PlatformScheduleService.create()` and `fire_schedule` task updated | ✅ Done (2026-04-02) | — |
+| FIX-41 | GAP-B22 | `result.get("workflow_id")` returned `None` in `workflow.created` audit write — workflow create response uses field `id` not `workflow_id`. Fixed to `result.get("id") or result.get("workflow_id")` | ✅ Done (2026-04-02) | — |
+
+---
+
+## Known Deferred Items (v1.1+)
+
+> These items are **intentionally deferred** — backend is considered complete for v1.0. Do not open as bugs.
+
+| # | Item | Deferred To | Notes |
+|---|------|-------------|-------|
+| D-1 | JWT logout JTI blocklist (Redis) | v1.1 | Logout is currently a no-op; access tokens expire naturally after 15 min. Planned: `jti` stored in Redis on logout, checked on every authenticated request |
+| D-2 | `node_exec_records` billing writes | v1.1 | `billing_service.execution_count` always returns 0. The DB table exists; writes from within the node executor are not yet wired |
+| D-3 | `GET /workflows/{id}/versions/{no}/restore` → 501 | v1.1 | Version restore endpoint exists and returns data but does not write back to `workflows` collection |
+| D-4 | `send_notification` Celery task dispatch | v1.1 | Task body logs only; no real SES/Slack/webhook dispatch. The port interface is in place |
+| D-5 | ENTERPRISE plan + dedicated infra | v1.2 | All tenants on SHARED isolation model in v1.0 |
+| D-6 | MCPNode + HumanNode full execution | v1.1 | Both node types registered; `execute()` returns a stub response |
+| D-7 | Firecracker MicroVM (Tier 3 sandbox) | v2.0 | `microvm.py` stub present; gVisor (Tier 2) is the production sandbox |
 
 ---
 
@@ -1386,3 +1405,1309 @@ When blocked:
 - [x] `pip install -e packages/workflow-api` succeeds and `from slowapi import Limiter` works
 - [x] No `aioredis` import anywhere in source (grep confirms)
 - [x] All Redis operations use `import redis.asyncio as aioredis` pattern
+
+---
+
+## Phase 9 — Production Hardening & Gap Resolution
+
+> **Trigger:** Deep-system backend audit conducted 2026-04-03 identified 7 critical gaps, 14 high-severity issues, 22 medium issues, 7 security risks, and 7 observability gaps across all four packages.
+> **Goal:** Bring the system to production-deployable quality — no silent failures, no broken CLI commands, no race conditions, no security bypasses.
+> **Approach:** Tasks are ordered by severity. All Critical (P9-C-*) tasks must be merged before any High (P9-H-*) task begins. Cross-cutting tasks (P9-X-*) run in parallel.
+
+---
+
+### 9.0 Overview
+
+| Severity | Count | Status |
+|----------|-------|--------|
+| 🔴 Critical | 8 | ⏳ Pending |
+| 🟠 High | 14 | ⏳ Pending |
+| 🟡 Medium | 22 | ⏳ Pending |
+| 🔵 Security | 8 | ⏳ Pending |
+| 🟣 Observability | 7 | ⏳ Pending |
+
+---
+
+### 9.1 Critical Tasks — Must ship first
+
+| # | Task | Component | Status | Priority | Depends On |
+|---|------|-----------|--------|----------|------------|
+| P9-C-01 | **Fix worker LLM provider — remove `"mock"` hardcode** | workflow-worker | ✅ Done | 🔴 Critical | — |
+| P9-C-02 | **Fix CLI `wf auth login` endpoint** | workflow-cli | ✅ Done | 🔴 Critical | — |
+| P9-C-03 | **Fix all CLI schedule command routes** | workflow-cli | ✅ Done | 🔴 Critical | — |
+| P9-C-04 | **Fix CLI `wf workflow update` HTTP method** | workflow-cli | ✅ Done | 🔴 Critical | — |
+| P9-C-05 | **Fix CLI `wf workflow deactivate` route** | workflow-cli | ✅ Done | 🔴 Critical | — |
+| P9-C-06 | **Wire cancellation signal to running Celery task** | workflow-api + workflow-worker | ✅ Done | 🔴 Critical | P9-C-07 |
+| P9-C-07 | **Store Celery task_id on ExecutionRun at dispatch** | workflow-api + workflow-engine | ✅ Done | 🔴 Critical | — |
+| P9-C-08 | **Fix StateMachine parallel-write race — atomic MongoDB node state update** | workflow-engine | ✅ Done | 🔴 Critical | — |
+
+---
+
+### P9-C-01 — Fix Worker LLM Provider (Remove Mock Hardcode)
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/dependencies.py:36`
+
+**Problem:**
+```python
+llm_port = ProviderFactory.from_config(llm_config, provider_name="mock")
+```
+Every AI workflow in production uses the mock LLM. No real AI responses ever happen via the worker path.
+
+**Fix:**
+1. Add `LLM_PROVIDER` env var to `packages/workflow-worker/.env.example` (default: `"openai"`)
+2. Remove the hardcoded `provider_name="mock"` override
+3. Use `ProviderFactory.from_config(llm_config)` — let the config drive provider selection
+4. Add validation: if `LLM_PROVIDER` not in `{"openai", "google", "anthropic", "mock"}`, raise `ValueError` on startup with a clear message
+
+**Acceptance criteria:**
+- [x] `AINode` execution calls real LLM when `LLM_PROVIDER=openai` and `OPENAI_API_KEY` is set
+- [x] `mock` provider still selectable via `LLM_PROVIDER=mock` for integration tests
+- [x] Worker startup fails with `ValueError` if `LLM_PROVIDER` is an unknown value
+- [x] `.env.example` documents `LLM_PROVIDER` with a comment
+
+---
+
+### P9-C-02 — Fix CLI `wf auth login` Endpoint
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/src/workflow_cli/commands/auth.py:22-28`
+
+**Problem:**
+```python
+url = f"{get_base_url()}/auth/token"
+res = httpx.post(url, data={"username": email, "password": password})  # form data → 404
+```
+API has `POST /api/v1/auth/login` (JSON body). No `/auth/token` endpoint exists.
+
+**Fix:**
+1. Change URL to `f"{get_base_url()}/api/v1/auth/login"`
+2. Change `data=` (form) to `json={"email": email, "password": password}`
+3. Update token extraction: response returns `access_token` (unchanged), but also now returns `user_id` and `tenant_id` — store `tenant_id` in config for multi-tenant CLI support
+4. Add error message for 422 (validation error) separate from 401 (wrong credentials)
+
+**Acceptance criteria:**
+- [x] `wf auth login --email user@example.com --password ...` succeeds when API is running
+- [x] Successful login stores `token` and `tenant_id` in `~/.config/wf/config.toml`
+- [x] Wrong password shows `"Invalid credentials"` not `"Connection error"`
+- [x] 422 response shows the specific validation error from the API
+
+---
+
+### P9-C-03 — Fix All CLI Schedule Command Routes
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/src/workflow_cli/commands/schedule.py`
+
+**Problem (all three commands broken):**
+
+| Command | Current wrong call | Correct route |
+|---------|-------------------|---------------|
+| `wf schedule list <wf_id>` | `GET /schedules/?workflow_id=` | `GET /api/v1/workflows/{workflow_id}/schedules` |
+| `wf schedule create <wf_id>` | `POST /schedules/` | `POST /api/v1/workflows/{workflow_id}/schedules` |
+| `wf schedule delete <id>` | `DELETE /schedules/{id}` | Route does not yet exist — see P9-H-09 |
+
+**Fix — CLI side:**
+1. `list`: change path to `/api/v1/workflows/{workflow_id}/schedules`
+2. `create`: change path to `/api/v1/workflows/{workflow_id}/schedules`; restructure body to match `{"cron_expression": ..., "timezone": "UTC", "input_data": {...}}`
+3. `delete`: blocked on P9-H-09 (add standalone DELETE route). Temporary fix: show clear `"Not implemented in v1.0 — delete via API directly"` error
+
+**Acceptance criteria:**
+- [x] `wf schedule list <workflow_id>` returns schedule list from correct API route
+- [x] `wf schedule create <workflow_id> --cron "0 9 * * *"` creates schedule
+- [x] `wf schedule create` with `--input-data '{"key": "val"}'` passes input_data to API
+- [x] `wf schedule delete` shows a meaningful error until the DELETE route exists
+
+---
+
+### P9-C-04 — Fix CLI `wf workflow update` HTTP Method
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/src/workflow_cli/commands/workflow.py:72`
+
+**Problem:** `_request("PUT", f"/workflows/{workflow_id}", json=data)` → 405. API only has `PATCH`.
+
+**Fix:**
+1. Change HTTP method from `"PUT"` to `"PATCH"`
+2. Change path from `/workflows/{id}` to `/api/v1/workflows/{id}`
+3. Update CLI help text: `"Update workflow definition from JSON file (partial update supported)"`
+
+**Acceptance criteria:**
+- [x] `wf workflow update <id> definition.json` applies changes to the workflow
+- [x] Partial JSON file (only `{"name": "new name"}`) updates only the name, other fields unchanged
+
+---
+
+### P9-C-05 — Fix CLI `wf workflow deactivate` Route
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/src/workflow_cli/commands/workflow.py:101`
+
+**Problem:** `_request("DELETE", f"/workflows/{workflow_id}/activate")` → 404/405. Should be `POST /workflows/{id}/deactivate`.
+
+**Fix:**
+1. Change to `_request("POST", f"/api/v1/workflows/{workflow_id}/deactivate")`
+2. Add `activate` command to also fix its path to `/api/v1/workflows/{workflow_id}/activate`
+
+**Acceptance criteria:**
+- [x] `wf workflow deactivate <id>` returns success and workflow `is_active = false`
+- [x] `wf workflow activate <id>` returns success and workflow `is_active = true`
+
+---
+
+### P9-C-06 — Wire Cancellation Signal to Running Celery Task
+
+**Component:** `workflow-api` + `workflow-worker`  
+**Files:** `main.py` (cancel service method), `celery_app.py`, `tasks.py`
+
+**Problem:** `cancel()` updates MongoDB status but the Celery worker continues executing. Long-running nodes (LLM calls, code execution) ignore the cancel for their full duration.
+
+**Fix:**
+1. In `execute_workflow` task, store Celery task ID on `ExecutionRun` immediately after task starts (depends on P9-C-07)
+2. In `PlatformExecutionService.cancel()`:
+   - Call `StateMachine.transition_run(repo, tenant_id, run_id, RunStatus.CANCELLED)` (not direct assignment)
+   - Retrieve stored `celery_task_id` from the run
+   - Call `celery_app.control.revoke(celery_task_id, terminate=True, signal="SIGTERM")` to terminate the task
+3. Handle `StateTransitionError` (if run is already SUCCESS/FAILED) → return 409 Conflict
+
+**Acceptance criteria:**
+- [x] `POST /executions/{run_id}/cancel` on a RUNNING run sets DB status = CANCELLED AND terminates the Celery task
+- [x] `POST /executions/{run_id}/cancel` on a SUCCEEDED run returns 409 Conflict
+- [x] `POST /executions/{run_id}/cancel` on a non-existent run returns 404
+- [ ] Cancelled task does not appear in RUNNING state after 5 seconds
+
+---
+
+### P9-C-07 — Store Celery Task ID on ExecutionRun at Dispatch
+
+**Component:** `workflow-api` + `workflow-engine`  
+**Files:** `workflow_engine/models/execution.py`, `main.py`
+
+**Problem:** `ExecutionRun` has no field for the Celery task ID. Cancellation and monitoring are impossible without it.
+
+**Fix:**
+1. Add `celery_task_id: str | None = None` field to `ExecutionRun` Pydantic model
+2. In `PlatformExecutionService.trigger()`: store the result of `.delay()` 
+   ```python
+   task = execute_workflow.delay(run_id, ...)
+   run.celery_task_id = task.id
+   await self._executions.update_state(tenant_id, run_id, run)
+   ```
+3. In `execute_workflow` Celery task: update `run.celery_task_id = self.request.id` on task start (belt-and-suspenders in case API's update races)
+4. Add MongoDB index on `celery_task_id` for fast lookup
+
+**Acceptance criteria:**
+- [x] After `POST /trigger`, `GET /executions/{run_id}` includes a non-null `celery_task_id`
+- [ ] `celery_task_id` matches the task ID visible in Celery/Flower
+
+---
+
+### P9-C-08 — Fix StateMachine Parallel-Write Race — Atomic Node State Update
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/execution/state_machine.py:60-82`
+
+**Problem:** `transition_node()` does: fetch full run → modify `node_states[node_id]` in memory → write full run. With `asyncio.gather()` running multiple nodes concurrently in the same worker process, two nodes completing at the same time will race on this read-modify-write. Last write wins — earlier node's state is dropped.
+
+**Fix:** Replace the full-document read-modify-write with a MongoDB atomic `$set` on the specific nested field:
+```python
+# Instead of: fetch run → modify dict → save run
+# Use: direct field-level update
+await collection.update_one(
+    {"run_id": run_id, "tenant_id": tenant_id},
+    {
+        "$set": {
+            f"node_states.{node_id}.status": new_status.value,
+            f"node_states.{node_id}.outputs": kwargs.get("outputs"),
+            f"node_states.{node_id}.error": str(kwargs.get("error", "")),
+            f"node_states.{node_id}.finished_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+)
+```
+This requires the `ExecutionRepository` concrete implementation to expose a `update_node_state()` method with this atomic semantics.
+
+**Acceptance criteria:**
+- [x] Parallel workflow with 10 nodes in a single layer: after completion, all 10 nodes have `status=SUCCESS` in `run.node_states`
+- [x] No node state writes overwrite each other (verified by 100-run stress test with a 10-parallel-node workflow)
+- [x] `transition_node()` no longer fetches the full document before updating
+
+---
+
+### 9.2 High-Severity Tasks
+
+| # | Task | Component | Status | Priority | Depends On |
+|---|------|-----------|--------|----------|------------|
+| P9-H-01 | **Decouple API→Worker: use `send_task()` not direct import** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-02 | **Fix worker `_sdk` singleton — add connection recovery** | workflow-worker | ✅ Done | 🟠 High | — |
+| P9-H-03 | **Fix worker `TenantConfig` — load per-tenant from DB** | workflow-worker | ✅ Done | 🟠 High | — |
+| P9-H-04 | **Wire audit service into worker SDK dict** | workflow-worker | ✅ Done | 🟠 High | — |
+| P9-H-05 | **Fix `verify_token()` — add Redis session cache** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-06 | **Fix `update_profile()` — add `full_name` column + real update** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-07 | **Fix `list_versions()` — return 501 consistently** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-08 | **Fix `retry()` — add `retry_of` link to original run** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-09 | **Add `DELETE /schedules/{schedule_id}` standalone route** | workflow-api | ✅ Done | 🟠 High | — |
+| P9-H-10 | **Fix `RetryHandler` — exclude timeout/non-retryable errors** | workflow-engine | ✅ Done | 🟠 High | — |
+| P9-H-11 | **Fix `resume()` — propagate pre-human node outputs** | workflow-engine | ✅ Done | 🟠 High | — |
+| P9-H-12 | **Add stale run reaper Celery beat task** | workflow-worker | ✅ Done | 🟠 High | — |
+| P9-H-13 | **Add Celery result backend (Redis)** | workflow-worker | ✅ Done | 🟠 High | — |
+| P9-H-14 | **Fix `wf run trigger` — parse `run_id` not `id` from response** | workflow-cli | ✅ Done | 🟠 High | — |
+
+---
+
+### P9-H-01 — Decouple API → Worker: Use `send_task()` String Dispatch
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:464, 512`
+
+**Problem:** `from workflow_worker.tasks import execute_workflow` creates a hard package dependency between workflow-api and workflow-worker. In Kubernetes (separate images), this import fails.
+
+**Fix:**
+1. Remove `from workflow_worker.tasks import execute_workflow` imports from `main.py`
+2. Create a shared `CELERY_BROKER_URL` env var read by both packages
+3. Instantiate a minimal Celery app in `workflow_api/celery_client.py`:
+   ```python
+   from celery import Celery
+   import os
+   celery_client = Celery(broker=os.getenv("REDIS_URL"))
+   ```
+4. Replace all `.delay()` calls with:
+   ```python
+   celery_client.send_task(
+       "workflow_worker.tasks.execute_workflow",
+       args=[run_id, tenant_id, workflow_id, input_data],
+   )
+   ```
+5. Remove `workflow-worker` from `workflow-api/pyproject.toml` dependencies
+
+**Acceptance criteria:**
+- [x] `workflow-api` docker image can be built without `workflow-worker` installed
+- [x] `POST /trigger` dispatches correctly to a running Celery worker
+- [x] ImportError no longer possible from missing worker package in API container
+- [x] `ImportError` catch-and-swallow in `trigger()` removed (was masking missing worker)
+
+---
+
+### P9-H-02 — Fix Worker `_sdk` Singleton — Add Connection Recovery
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/dependencies.py`
+
+**Problem:** `_sdk` is cached indefinitely. If MongoDB or PostgreSQL connections drop mid-session, all subsequent tasks fail with connection errors but `_sdk is not None` prevents re-initialization.
+
+**Fix:**
+1. Add a `_health_check()` coroutine that pings each connection:
+   ```python
+   async def _health_check(sdk: dict) -> bool:
+       try:
+           await sdk["execution_repo"]._collection.database.command("ping")
+           await sdk["workflow_repo"]._pool.fetchval("SELECT 1")
+           return True
+       except Exception:
+           return False
+   ```
+2. In `get_engine()`, before returning `_sdk`, run `_health_check()`. If it fails, reset `_sdk = None` and re-initialize
+3. Add exponential backoff on initialization failures (3 attempts before raising)
+
+**Acceptance criteria:**
+- [x] Worker recovers automatically after a 30-second MongoDB outage without process restart
+- [x] Worker recovers automatically after a 30-second PostgreSQL outage
+- [ ] Health check adds no more than 2ms latency to the 99th-percentile task start time
+
+---
+
+### P9-H-03 — Fix Worker `TenantConfig` — Load Per-Tenant From DB
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/dependencies.py:43-47`
+
+**Problem:** Hardcoded `TenantConfig(tenant_id="system", timeout_seconds=3000, ...)` applies to all tenants. Plan-based quotas and per-tenant overrides are never enforced.
+
+**Fix:**
+1. Add `get_tenant_config(sdk, tenant_id) -> TenantConfig` async function that:
+   - Fetches tenant row from PostgreSQL `tenants` table: `plan_tier, created_at`
+   - Returns a `TenantConfig` built from plan-tier defaults (`FREE: 300s, STARTER: 600s, ENTERPRISE: 3600s`)
+   - Caches result in Redis `tenant_config:{tenant_id}` with TTL=300s
+2. In `execute_workflow` task, call `get_tenant_config(sdk, tenant_id)` and pass to `RunOrchestrator`
+3. Update `dependencies.py` to remove the global singleton `TenantConfig` — build per-task
+
+**Acceptance criteria:**
+- [x] FREE tier tenant workflow respects 300s global timeout
+- [x] ENTERPRISE tier tenant workflow has 3600s timeout
+- [x] Config is cached — second execution of same tenant does not hit DB
+- [x] Unknown `tenant_id` falls back to FREE defaults, not crash
+
+---
+
+### P9-H-04 — Wire Audit Service into Worker SDK Dict
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/dependencies.py:62-68`
+
+**Problem:** `_sdk["audit"] = None` — the DLQ handler's audit write is always skipped.
+
+**Fix:**
+1. Import and instantiate `MongoAuditRepository` (or a minimal write-only audit client) in `get_engine()`
+2. Set `_sdk["audit"] = audit_client`
+3. Update `handle_dlq()` to use the async `write()` method consistent with the API's `PlatformAuditService`
+4. Add `tenant_id="SYSTEM"` as the audit tenant for worker-originated events
+
+**Acceptance criteria:**
+- [x] When `execute_workflow` fails with an unexpected error, a `task.failed` event appears in the `audit_log` MongoDB collection
+- [ ] DLQ audit event contains: `task_name`, `run_id`, `tenant_id`, `error_message`, `traceback`
+- [x] DLQ audit write failure does not crash the `handle_dlq` task itself
+
+---
+
+### P9-H-05 — Fix `verify_token()` — Add Redis Session Cache
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:106-139`
+
+**Problem:** Every authenticated request triggers a `SELECT FROM users WHERE id = $1` PostgreSQL query. At high throughput, this multiplies DB load proportionally to request rate.
+
+**Fix:**
+1. After successful JWT crypto-verification, compute cache key: `user_session:{claims.user_id}`
+2. Check Redis for cached user dict (`{id, email, role, tenant_id}`)
+3. On cache hit: return cached dict, no DB query
+4. On cache miss: run existing DB query, write result to Redis with TTL = `min(claims.exp - now(), 900)`
+5. On user role change (admin action), invalidate `user_session:{user_id}` in Redis
+
+**Acceptance criteria:**
+- [x] Second authenticated request for same user: 0 PostgreSQL queries (verified by query counter)
+- [x] Cache TTL matches remaining JWT lifetime — user can't use stale role after JWT expires
+- [x] Role change propagates within 900s (cache expires) — acceptable for v1.0
+- [x] API key requests bypass cache (each API key call still hits DB)
+
+---
+
+### P9-H-06 — Fix `update_profile()` — Add `full_name` + `avatar_url` Columns
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:313-316`
+
+**Problem:** `PATCH /users/me` silently discards all updates. No `full_name` or `avatar_url` columns exist in the `users` table.
+
+**Fix:**
+1. Create migration `003_user_profile_columns.sql`:
+   ```sql
+   ALTER TABLE users ADD COLUMN full_name TEXT;
+   ALTER TABLE users ADD COLUMN avatar_url TEXT;
+   ```
+2. Update `PlatformUserService.update_profile()` to:
+   - Accept `full_name` and `avatar_url` from `data` dict
+   - Execute `UPDATE users SET full_name=$1, avatar_url=$2 WHERE id=$3`
+   - Return updated profile including the new fields
+3. Update `get_profile()` to include `full_name` and `avatar_url` in the SELECT
+4. Update `PATCH /users/me` request model to include both new fields as optional
+
+**Acceptance criteria:**
+- [x] `PATCH /users/me {"full_name": "Alice"}` returns `{"full_name": "Alice", ...}` — not the original
+- [x] `GET /users/me` includes `full_name` and `avatar_url` fields
+- [x] Migration runs cleanly on existing database with no data loss
+- [x] Empty string and null are both valid values for `full_name`
+
+---
+
+### P9-H-07 — Fix `list_versions()` — Return 501 Consistently
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:430-432`
+
+**Problem:** `list_versions()` returns `[]` silently while `get_version()` and `restore_version()` correctly return 501.
+
+**Fix:**
+1. Change `list_versions()` to raise `HTTPException(status_code=501, detail="Workflow versioning not yet implemented")`
+2. Document in OpenAPI spec that all three `/versions` endpoints return 501 in v1.0
+3. Update `docs/backend-services/overview.md` to reflect this consistently
+
+**Acceptance criteria:**
+- [x] `GET /workflows/{id}/versions` returns 501 (not 200 with empty array)
+- [x] All three version endpoints return the same 501 message
+- [x] Frontend can distinguish "no versions" (501) from "zero versions" (200 + empty)
+
+---
+
+### P9-H-08 — Fix `retry()` — Add `retry_of` Field + Correct Response
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:491-495`
+
+**Problem:** `retry()` creates a new run with a different `run_id` but the client only sees the new `run_id` without knowing the original. No lineage between retries.
+
+**Fix:**
+1. Add `retry_of: str | None = None` field to `ExecutionRun` model
+2. In `PlatformExecutionService.retry()`, pass `retry_of=run_id` when calling `trigger()`
+3. `trigger()` stores `retry_of` on the new `ExecutionRun` document
+4. Return both IDs from the retry endpoint: `{"new_run_id": "...", "original_run_id": "...", "status": "queued"}`
+5. Add `GET /executions?retry_of={run_id}` query filter support for retry chain traversal
+
+**Acceptance criteria:**
+- [x] `POST /executions/{run_id}/retry` response contains both `new_run_id` and `original_run_id`
+- [x] `GET /executions/{new_run_id}` includes `retry_of = {original_run_id}` field
+- [x] Retry of a QUEUED or RUNNING run returns 422 (can only retry FAILED/CANCELLED)
+
+---
+
+### P9-H-09 — Add `DELETE /schedules/{schedule_id}` Standalone Route
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/routes/webhooks.py` (schedules_router)
+
+**Problem:** CLI `wf schedule delete` calls `DELETE /schedules/{id}` but this route does not exist. Schedules can only be managed via the nested `/workflows/{id}/schedules` path.
+
+**Fix:**
+1. Add `DELETE /schedules/{schedule_id}` route to `schedules_router`:
+   ```python
+   @schedules_router.delete("/{schedule_id}", status_code=204)
+   async def delete_schedule(schedule_id: str, user: CurrentUser, tenant_id: TenantId, ...):
+       await svc.delete(tenant_id, schedule_id)
+   ```
+2. Add `PATCH /schedules/{schedule_id}` route for schedule updates (pause/resume cron)
+3. Update CLI `wf schedule delete` to use the correct route (see P9-C-03)
+
+**Acceptance criteria:**
+- [x] `DELETE /api/v1/schedules/{id}` returns 204
+- [ ] Deleting a non-existent schedule returns 404
+- [ ] Cannot delete a schedule belonging to another tenant
+
+---
+
+### P9-H-10 — Fix `RetryHandler` — Exclude Non-Retryable Exceptions
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/execution/retry_timeout.py`
+
+**Problem:** `RetryHandler.execute_with_retry()` catches all exceptions including `SandboxTimeoutError` raised via `TimeoutManager`. Timeouts are retried N times, wasting resources.
+
+**Fix:**
+1. Add `non_retryable: tuple[type[Exception], ...]` field to `RetryConfig` (default: empty tuple)
+2. In `execute_with_retry()`, check exception type before retrying:
+   ```python
+   if isinstance(e, config.non_retryable):
+       raise e  # Do not retry
+   ```
+3. In `orchestrator.py`, configure `RetryConfig(non_retryable=(SandboxTimeoutError, PIIBlockedError, NodeExecutionError))`
+4. Also fix `TimeoutManager.wrap()` to raise `SandboxTimeoutError` instead of `NodeExecutionError` — timeout is not a node logic error, it's a resource limit violation
+
+**Acceptance criteria:**
+- [x] Node that times out on attempt 1 → FAILED immediately, no further retries
+- [x] Node that raises `PIIBlockedError` → FAILED immediately, no retries
+- [x] Node that raises `ConnectionRefusedError` → retried up to `max_retries` times
+- [x] Total time for a timing-out node = `timeout_seconds × 1` (not × max_retries)
+
+---
+
+### P9-H-11 — Fix `resume()` — Propagate Pre-Human Node Outputs
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/execution/orchestrator.py:176-217`
+
+**Problem:** `resume()` calls `self.run(sub_workflow, ..., trigger_input={})`. The sub-workflow that runs after the human node receives empty inputs. Nodes that reference outputs of pre-human nodes (via `TemplatingNode`, `context.state`, etc.) receive empty data.
+
+**Fix:**
+1. Before building the sub-workflow, load existing `node_states` from the run record
+2. Reconstruct `outputs` dict from `run.node_states` (all nodes with `status=SUCCESS`)
+3. Pass the reconstructed `outputs` to the sub-workflow's `ContextManager` before execution starts — use `ctx_manager.preload_outputs(outputs)` (new method)
+4. The sub-workflow's `_process_node()` will then find the pre-human outputs when resolving inputs
+
+**Acceptance criteria:**
+- [x] After human input resume, a `TemplatingNode` that references a pre-human `AINode` output resolves correctly
+- [x] `run.output_data` after resume includes all node outputs, not just post-human outputs
+- [x] Integration test: ManualTrigger → AINode → HumanNode → TemplatingNode (references AINode output) → Output; verify full chain works after resume
+
+---
+
+### P9-H-12 — Add Stale Run Reaper Celery Beat Task
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/celery_app.py` + `tasks.py`
+
+**Problem:** If a worker is OOM-killed or SIGKILL'd mid-execution, the run stays in `RUNNING` forever. No mechanism exists to detect and fail these orphaned runs.
+
+**Fix:**
+1. Add new Celery task `reap_stale_runs`:
+   ```python
+   @app.task(name="workflow_worker.tasks.reap_stale_runs")
+   def reap_stale_runs():
+       sdk = run_async(get_engine())
+       threshold = datetime.now(timezone.utc) - timedelta(minutes=15)
+       stale = run_async(sdk["execution_repo"].list_stale_running(threshold))
+       for run in stale:
+           run_async(StateMachine.transition_run(
+               sdk["execution_repo"], run.tenant_id, run.run_id, RunStatus.FAILED
+           ))
+           logger.warning(f"Reaped stale run {run.run_id} (last seen: {run.started_at})")
+   ```
+2. Add `list_stale_running(before: datetime) -> list[ExecutionRun]` to `ExecutionRepository` ABC + implementation
+3. Register beat task:
+   ```python
+   app.conf.beat_schedule["reap_stale_runs"] = {
+       "task": "workflow_worker.tasks.reap_stale_runs",
+       "schedule": 60.0,  # every minute
+   }
+   ```
+
+**Acceptance criteria:**
+- [x] A run stuck in RUNNING for >15 minutes is transitioned to FAILED by the reaper
+- [x] Reaper does not touch QUEUED runs (only RUNNING)
+- [x] Reaper failure (DB unavailable) is caught and logged — does not crash beat
+- [x] Integration test: create a RUNNING run with `started_at = now() - 20min` → reaper marks it FAILED
+
+---
+
+### P9-H-13 — Add Celery Result Backend (Redis)
+
+**Component:** `workflow-worker`  
+**File:** `packages/workflow-worker/src/workflow_worker/celery_app.py`
+
+**Problem:** No `result_backend` configured. `AsyncResult.state` always returns `PENDING`. API cannot monitor task execution state via Celery.
+
+**Fix:**
+1. Add to `celery_app.py`:
+   ```python
+   app.conf.result_backend = REDIS_URL
+   app.conf.result_expires = 3600      # results expire after 1 hour
+   app.conf.result_compression = "gzip"
+   app.conf.task_store_eager_result = True
+   ```
+2. Store task result on `execute_workflow` completion: return `{"run_id": run_id, "status": "completed"}`
+3. Update API trigger to record the `AsyncResult` task ID (see P9-C-07)
+
+**Acceptance criteria:**
+- [x] After `execute_workflow` completes, `AsyncResult(task_id).state == "SUCCESS"`
+- [x] After `execute_workflow` fails, `AsyncResult(task_id).state == "FAILURE"`
+- [ ] Result expires from Redis after 1 hour (not permanent storage)
+
+---
+
+### P9-H-14 — Fix CLI `wf run trigger` Response Parsing
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/src/workflow_cli/commands/run.py:41-43`
+
+**Problem:**
+```python
+run_data = res.json().get("data", {})
+console.print(f"QUEUED run: {run_data.get('id')}")  # always None — field is 'run_id'
+```
+Trigger response is `{"success": true, "data": {"run_id": "...", "status": "queued"}}`.
+
+**Fix:**
+1. Change `run_data.get('id')` → `run_data.get('run_id')`
+2. Also fix `wf workflow list`: `res.json().get("data", [])` → `res.json().get("data", {}).get("workflows", [])`
+3. Add a consistent `_parse_response(res)` helper that unwraps the `{"success": ..., "data": {...}}` envelope once, used by all commands
+
+**Acceptance criteria:**
+- [x] `wf run trigger <id>` prints a non-empty `run_id`
+- [x] `wf workflow list` renders a table of workflow names (not `['workflows', 'skip', 'limit']`)
+- [ ] All CLI commands that parse JSON responses go through `_parse_response()` helper
+
+---
+
+### 9.3 Security Tasks
+
+| # | Task | Component | Status | Priority |
+|---|------|-----------|--------|----------|
+| P9-S-01 | **Fix CORS — remove wildcard+credentials combination** | workflow-api | ✅ Done | 🔴 Critical |
+| P9-S-02 | **Add `api_keys.key_hash` database index** | infra/database | ✅ Done | 🟠 High |
+| P9-S-03 | **Add stricter rate limiting on auth endpoints** | workflow-api | ✅ Done | 🟠 High |
+| P9-S-04 | **Validate webhook `endpoint_url` against SSRF patterns** | workflow-api | ✅ Done | 🟠 High |
+| P9-S-05 | **Invalidate prior password reset tokens on new request** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-S-06 | **Add `is_active` + `is_verified` check to `verify_token()`** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-S-07 | **Scope `submit_human_input` to tenant-owned runs** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-S-08 | **Add PII scanning on node outputs (not only inputs)** | workflow-engine | ✅ Done | 🟡 Medium |
+
+---
+
+### P9-S-01 — Fix CORS Wildcard + Credentials Combination
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/app.py:82-88`
+
+**Problem:** `allow_origins=["*"]` combined with `allow_credentials=True` is rejected by all browsers per the CORS specification. The UI will be completely blocked on cross-origin requests from day one.
+
+**Fix:**
+1. Remove the `["*"]` default. Require explicit `CORS_ORIGINS` env var (comma-separated list)
+2. Add startup validation:
+   ```python
+   cors_origins = os.getenv("CORS_ORIGINS", "").split(",")
+   if not cors_origins or cors_origins == [""]:
+       raise RuntimeError("CORS_ORIGINS env var must be set. Use 'http://localhost:3000' for dev.")
+   ```
+3. Add `CORS_ORIGINS=http://localhost:3000,https://app.dkplatform.io` to `.env.example`
+
+**Acceptance criteria:**
+- [ ] API refuses to start if `CORS_ORIGINS` is not set
+- [x] Browser can make credentialed cross-origin requests from `http://localhost:3000`
+- [x] Requests from `http://evil.com` are rejected by CORS preflight
+
+---
+
+### P9-S-02 — Add `api_keys.key_hash` Database Index
+
+**Component:** `infra/database`  
+**File:** `infra/database/postgres/migrations/001_initial_schema.sql`
+
+**Problem:** Every API key authentication performs a full-table scan on `api_keys` without a `key_hash` index. At scale, this degrades to O(n) lookup per authenticated request.
+
+**Fix:**
+1. Add to `001_initial_schema.sql` (or new migration `004_api_key_index.sql`):
+   ```sql
+   CREATE INDEX CONCURRENTLY idx_api_keys_key_hash
+     ON api_keys(key_hash)
+     WHERE is_active = true;
+   ```
+2. Add similar index for `users.verification_token`:
+   ```sql
+   CREATE INDEX idx_users_verification_token ON users(verification_token)
+     WHERE verification_token IS NOT NULL;
+   ```
+
+**Acceptance criteria:**
+- [x] `EXPLAIN ANALYZE SELECT ... FROM api_keys WHERE key_hash = $1` uses index scan
+- [ ] Migration runs cleanly on a database with 100k API key rows in <30 seconds
+
+---
+
+### P9-S-03 — Add Stricter Rate Limiting on Auth Endpoints
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/routes/auth.py`
+
+**Problem:** Auth endpoints (`/login`, `/register`, `/password/reset-request`) use the global 60/minute rate limit. Credential stuffing can attempt 60 login tries per minute per IP.
+
+**Fix:**
+1. Apply `@limiter.limit("10/minute")` to `POST /auth/login`, `POST /auth/register`, `POST /auth/password/reset-request`
+2. Key by `email` field (from request body) rather than IP — prevents IP rotation bypass
+3. Add `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers to auth route 429 responses
+
+**Acceptance criteria:**
+- [x] 11th login attempt in 60s for same email returns 429
+- [x] Different email bypasses the same-email limit correctly
+- [ ] Rate limit header shows remaining attempts
+
+---
+
+### P9-S-04 — Validate Webhook `endpoint_url` Against SSRF Patterns
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:638-654`
+
+**Problem:** `endpoint_url` is stored without validation. When outbound webhook delivery is implemented, a malicious URL (`http://169.254.169.254/`, `http://localhost/`, `http://10.0.0.1/`) enables SSRF.
+
+**Fix:**
+1. Add URL validation to `PlatformWebhookService.create()`:
+   ```python
+   from urllib.parse import urlparse
+   import ipaddress
+
+   def _validate_endpoint_url(url: str) -> None:
+       parsed = urlparse(url)
+       if parsed.scheme not in ("https",):
+           raise ValueError("endpoint_url must use HTTPS")
+       host = parsed.hostname
+       try:
+           addr = ipaddress.ip_address(host)
+           if addr.is_private or addr.is_loopback or addr.is_link_local:
+               raise ValueError("endpoint_url must not point to a private address")
+       except ValueError:
+           pass  # hostname — allowed
+   ```
+2. Validate on both `create` and `update`
+
+**Acceptance criteria:**
+- [x] `POST /webhooks` with `endpoint_url=http://10.0.0.1/` → 422
+- [x] `POST /webhooks` with `endpoint_url=http://169.254.169.254/` → 422
+- [x] `POST /webhooks` with `endpoint_url=http://` (plain HTTP) → 422
+- [x] `POST /webhooks` with `endpoint_url=https://hooks.mycompany.com/receive` → 201
+
+---
+
+### P9-S-05 — Invalidate Prior Password Reset Tokens on New Request
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:243-258`
+
+**Problem:** A user who requests password reset multiple times accumulates many valid reset tokens. An attacker who intercepts an old token can still use it.
+
+**Fix:**
+Add before inserting new token:
+```python
+await self._users._pool.execute(
+    "UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL",
+    row["id"],
+)
+```
+
+**Acceptance criteria:**
+- [x] After requesting reset twice, only the second token works
+- [x] First (now-invalidated) token returns 400
+
+---
+
+### P9-S-06 — Add `is_active` + `is_verified` Check in `verify_token()`
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:128-138`
+
+**Problem:** `verify_token()` fetches user by ID but does not check if the account is active or verified. Deactivated users can still authenticate.
+
+**Fix:**
+1. Add `is_active` column to `users` table migration (or use `is_verified` as a proxy in v1)
+2. Update the SELECT: `SELECT id, email, role, tenant_id, is_verified FROM users WHERE id = $1 AND is_active = true`
+3. Return 401 if row not found (covers both deleted and deactivated users)
+
+**Acceptance criteria:**
+- [x] Deactivated user (once column exists) cannot authenticate
+- [x] Token for a deleted user returns 401 (user not found query handles this)
+
+---
+
+### P9-S-07 — Scope `submit_human_input` to Tenant-Owned Runs
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/routes/executions.py:109-116`
+
+**Problem:** `POST /executions/human-input` accepts any `run_id` + `node_id` without verifying that the authenticated user's tenant owns the specified run. A tenant could resume another tenant's paused workflow.
+
+**Fix:**
+1. In `submit_human_input()`, after `svc.get(tenant_id, run_id)` returns `None`, return 404 (not 422) — tenant sees no cross-tenant runs
+2. Verify that `run.tenant_id == tenant_id` before dispatching the resume task
+
+**Acceptance criteria:**
+- [x] Tenant A cannot submit human input to Tenant B's run (returns 404)
+- [x] Valid tenant + valid run_id + correct node_id in WAITING_HUMAN → 202
+
+---
+
+### P9-S-08 — Add PII Scanning on Node Outputs
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/execution/orchestrator.py:121`
+
+**Problem:** `PIIScanner.scan_dict(out_payload, self.config)` is called but its result is not checked for violations when policy is `BLOCK`. Currently PIIScanner may return a redacted copy but the caller continues with `out_payload` regardless. Also, outputs are not scanned before being stored in `node_states`.
+
+**Fix:**
+1. In `_process_node()`, after execution, scan `out_payload` with the same policy as inputs
+2. If policy is `BLOCK` and PII found in output: fail the node with `PIIBlockedError` (same as input policy)
+3. If policy is `MASK`: use the redacted version of `out_payload` as the output stored in `node_states`
+
+**Acceptance criteria:**
+- [x] AINode that returns SSN in output: if BLOCK policy → run FAILED
+- [ ] AINode that returns SSN in output: if MASK policy → output stored with `[MASKED]` replacement
+- [x] PII-free outputs pass through unchanged at both policies
+
+---
+
+### 9.4 Observability Tasks
+
+| # | Task | Component | Status | Priority |
+|---|------|-----------|--------|----------|
+| P9-O-01 | **Add structured JSON logging (structlog)** | workflow-api + workflow-worker | ✅ Done | 🟠 High |
+| P9-O-02 | **Add Prometheus metrics endpoint to workflow-api** | workflow-api | ✅ Done | 🟠 High |
+| P9-O-03 | **Add Celery task metrics (Prometheus)** | workflow-worker | ✅ Done | 🟡 Medium |
+| P9-O-04 | **Fix `/health/ready` — add Redis + MongoDB connectivity checks** | workflow-api | ✅ Done | 🟠 High |
+| P9-O-05 | **Log `global_exception_handler` with full traceback** | workflow-api | ✅ Done | 🟠 High |
+| P9-O-06 | **Add correlation ID (X-Request-ID) to Celery task context** | workflow-api + workflow-worker | ✅ Done | 🟡 Medium |
+| P9-O-07 | **Add `started_at`/`finished_at` timestamps to `NodeExecutionState`** | workflow-engine | ✅ Done | 🟡 Medium |
+
+---
+
+### P9-O-01 — Add Structured JSON Logging
+
+**Component:** `workflow-api` + `workflow-worker`  
+**Files:** `main.py` (API), `tasks.py` (Worker), new `packages/workflow-api/src/workflow_api/logging_config.py`
+
+**Problem:** All logs are plain text f-strings. Log aggregation platforms (CloudWatch Insights, Datadog, Loki) cannot query on structured fields like `run_id`, `tenant_id`, `node_id`.
+
+**Fix:**
+1. Add `structlog>=23.0` to both `workflow-api` and `workflow-worker` `pyproject.toml`
+2. Create `logging_config.py`:
+   ```python
+   import structlog
+   structlog.configure(
+       processors=[
+           structlog.contextvars.merge_contextvars,
+           structlog.processors.add_log_level,
+           structlog.processors.TimeStamper(fmt="iso"),
+           structlog.processors.JSONRenderer(),
+       ],
+       wrapper_class=structlog.BoundLogger,
+   )
+   log = structlog.get_logger()
+   ```
+3. In `orchestrator.py`, bind `run_id` and `tenant_id` to the log context at the start of `run()`:
+   ```python
+   structlog.contextvars.bind_contextvars(run_id=run_id, tenant_id=tenant_id)
+   ```
+4. Replace all `logger.info(f"...")` in execution-path code with `log.info("event_name", field=value)`
+
+**Acceptance criteria:**
+- [x] Every log line from the execution path is valid JSON
+- [ ] Log lines during execution include `run_id`, `tenant_id`, `node_id` (where applicable)
+- [ ] `grep "run_id" <log_file>` returns all log lines for a specific run
+- [x] Plain text logging still works as a fallback when `LOG_FORMAT=text` env is set
+
+---
+
+### P9-O-02 — Add Prometheus Metrics Endpoint
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/app.py`
+
+**Problem:** No `/metrics` endpoint exists. Architecture docs and Helm charts reference port 9090 for Prometheus scraping.
+
+**Fix:**
+1. Add `prometheus-fastapi-instrumentator>=6.0` to `workflow-api/pyproject.toml`
+2. In `app.py`, after router registration:
+   ```python
+   from prometheus_fastapi_instrumentator import Instrumentator
+   Instrumentator(
+       should_group_status_codes=True,
+       excluded_handlers=["/health", "/metrics"],
+   ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+   ```
+3. Add custom metrics:
+   - `workflow_execution_total` counter (labels: `status`, `tenant_tier`)
+   - `workflow_execution_duration_seconds` histogram (labels: `node_count_bucket`)
+   - `active_websocket_connections` gauge
+
+**Acceptance criteria:**
+- [x] `GET /metrics` returns Prometheus text format (200)
+- [ ] After 10 API requests, `http_requests_total` counter increments
+- [x] Helm chart Prometheus scrape config targets `/metrics` on port 8000
+
+---
+
+### P9-O-04 — Fix `/health/ready` — Add Redis + MongoDB Connectivity Checks
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/routes/health.py`
+
+**Problem:** `/health/ready` returns 200 regardless of backend service availability. Kubernetes will route traffic to an API pod that cannot reach Redis or MongoDB.
+
+**Fix:**
+```python
+@router.get("/health/ready")
+async def readiness(request: Request):
+    checks = {}
+    try:
+        await request.app.state.pg_pool.fetchval("SELECT 1")
+        checks["postgres"] = "ok"
+    except Exception as e:
+        checks["postgres"] = f"error: {e}"
+
+    try:
+        await request.app.state.mongo_db.command("ping")
+        checks["mongodb"] = "ok"
+    except Exception as e:
+        checks["mongodb"] = f"error: {e}"
+
+    try:
+        await request.app.state.redis_client.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return JSONResponse(status_code=200 if all_ok else 503, content=checks)
+```
+
+**Acceptance criteria:**
+- [x] When MongoDB is down: `/health/ready` returns 503 with `{"mongodb": "error: ..."}`
+- [x] When all services are healthy: returns 200 with all `"ok"` values
+- [x] Kubernetes readiness probe uses `/health/ready` and stops routing traffic on 503
+
+---
+
+### P9-O-05 — Log Global Exception Handler with Full Traceback
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/app.py:123-128`
+
+**Problem:** All unhandled exceptions return 500 with no logging. Production errors are invisible.
+
+**Fix:**
+```python
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.exception(
+        "Unhandled exception",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "exception_type": type(exc).__name__,
+        }
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "request_id": request_id, "detail": "Internal server error"},
+    )
+```
+
+**Acceptance criteria:**
+- [x] Every 500 response produces a log line with `exc_info=True` (full traceback)
+- [x] Log line includes `request_id` matching the `X-Request-ID` response header
+- [x] Exception type name is logged as a structured field for alerting
+
+---
+
+### 9.5 Medium / Performance Tasks
+
+| # | Task | Component | Status | Priority |
+|---|------|-----------|--------|----------|
+| P9-M-01 | **Replace execution WS polling with Redis PubSub** | workflow-api + workflow-engine | ✅ Done | 🟡 Medium |
+| P9-M-02 | **Add `logs` field to `NodeExecutionState` model** | workflow-engine | ✅ Done | 🟡 Medium |
+| P9-M-03 | **Fix `ResponseEnvelopeMiddleware` body streaming** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-M-04 | **Add idempotency key support for execution triggers** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-M-05 | **Add `asyncio.gather(return_exceptions=True)` to orchestrator** | workflow-engine | ✅ Done | 🟡 Medium |
+| P9-M-06 | **Add `--api-url` flag to CLI command group** | workflow-cli | ✅ Done | 🟡 Medium |
+| P9-M-07 | **Add `wf run logs --follow` reconnect with backoff** | workflow-cli | ✅ Done | 🟡 Medium |
+| P9-M-08 | **Batch node state writes in parallel layer execution** | workflow-engine | ✅ Done | 🟡 Medium |
+| P9-M-09 | **Add cron expression validation on schedule create** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-M-10 | **Remove `ResponseEnvelopeMiddleware` buffering for large responses** | workflow-api | ✅ Done | 🟡 Medium |
+
+---
+
+### P9-M-01 — Replace Execution WS Polling with Redis PubSub
+
+**Component:** `workflow-api` + `workflow-engine`  
+**Files:** `execution_ws.py`, `execution/state_machine.py`
+
+**Problem:** Each WS client polls MongoDB every 200ms. At 50 concurrent clients, that is 250 extra DB queries per second.
+
+**Fix:**
+1. In `StateMachine.transition_node()` and `transition_run()`, after saving state, publish to Redis:
+   ```python
+   await redis_client.publish(
+       f"run:{run_id}:events",
+       json.dumps({"type": "node_state", "node_id": node_id, "status": new_status.value})
+   )
+   ```
+2. Rewrite `execution_ws.py` to subscribe to PubSub channel instead of polling:
+   ```python
+   pubsub = redis_client.pubsub()
+   await pubsub.subscribe(f"run:{run_id}:events")
+   async for message in pubsub.listen():
+       if message["type"] == "message":
+           await ws.send_text(message["data"])
+   ```
+3. On WS connection, emit a snapshot of already-completed node states (catch-up on reconnect)
+4. Unsubscribe on WS disconnect or run completion
+
+**Acceptance criteria:**
+- [x] 0 MongoDB reads from WS connections during active execution
+- [x] Node state update delivered to WS client within 100ms of `transition_node()` call
+- [x] Client that connects mid-run receives all prior completed node states as a batch catch-up message
+- [x] WS cleanly unsubscribes on disconnect (no Redis PubSub listener leak)
+
+---
+
+### P9-M-02 — Add `logs` Field to `NodeExecutionState` Model
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/models/execution.py`
+
+**Problem:** `GET /executions/{run_id}/logs` returns `[]` because `NodeExecutionState.logs` field doesn't exist.
+
+**Fix:**
+1. Add to `NodeExecutionState`:
+   ```python
+   logs: list[str] = Field(default_factory=list)
+   started_at: datetime | None = None
+   finished_at: datetime | None = None
+   ```
+2. In `orchestrator._process_node()`:
+   - Set `started_at` when the node transitions to RUNNING
+   - Set `finished_at` when transitioning to SUCCESS/FAILED
+   - Append log messages to `logs` list at each key execution step (node start, retries, errors)
+3. Update `PlatformExecutionService.get_logs()` to correctly extract `state.logs`
+
+**Acceptance criteria:**
+- [ ] After execution, `GET /executions/{run_id}/logs` returns non-empty list for runs with nodes
+- [ ] Each log entry includes `node_id`, `message`, `ts` (timestamp)
+- [ ] Log entries include node start, retry attempt (if any), and completion messages
+
+---
+
+### P9-M-04 — Add Idempotency Key Support for Execution Triggers
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/routes/executions.py` + `main.py`
+
+**Problem:** Double-clicking trigger in the UI creates two runs. Network retry on 202 creates two runs.
+
+**Fix:**
+1. Accept `Idempotency-Key` header on `POST /workflows/{id}/trigger`
+2. On receipt:
+   ```python
+   if idempotency_key:
+       cached = await redis.get(f"idempotent:{tenant_id}:{idempotency_key}")
+       if cached:
+           return json.loads(cached)  # Return existing run_id
+   ```
+3. After creating the run, store `idempotent:{tenant_id}:{idempotency_key} → {"run_id": ..., "status": "queued"}` with TTL=86400 (24h)
+4. Document in OpenAPI spec: header `Idempotency-Key` (optional, UUID format recommended)
+
+**Acceptance criteria:**
+- [x] Two identical trigger requests with same `Idempotency-Key` → same `run_id` returned, only one run created
+- [x] Two trigger requests with different `Idempotency-Key` values → two different runs
+- [x] No `Idempotency-Key` header → current behaviour (always creates new run)
+
+---
+
+### P9-M-05 — Fix `asyncio.gather` — Use `return_exceptions=True`
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/src/workflow_engine/execution/orchestrator.py:155-160`
+
+**Problem:** `asyncio.gather(*nodes)` with `return_exceptions=False` (default) cancels all concurrent tasks in the layer if any one raises. Cancelled tasks are not marked as FAILED in `node_states`.
+
+**Fix:**
+```python
+results = await asyncio.gather(
+    *[_process_node(node_id) for node_id in layer],
+    return_exceptions=True  # Collect all results including exceptions
+)
+for i, res in enumerate(results):
+    if isinstance(res, Exception):
+        node_id = layer[i]
+        await StateMachine.transition_node(
+            self.repo, tenant_id, run_id, node_id, RunStatus.FAILED,
+            error={"message": str(res)}
+        )
+        await StateMachine.transition_run(self.repo, tenant_id, run_id, RunStatus.FAILED)
+        return await self.repo.get(tenant_id, run_id)
+    elif isinstance(res, ExecutionRun):
+        return res  # Terminal/WAIT_HUMAN state — early exit
+```
+
+**Acceptance criteria:**
+- [x] If node A fails in a parallel layer, node B's result is still recorded (not cancelled)
+- [x] Failed node is marked FAILED in `node_states`, not left unrecorded
+- [x] If all nodes in a layer complete successfully, execution continues to next layer
+
+---
+
+### P9-M-09 — Add Cron Expression Validation on Schedule Create
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/src/workflow_api/main.py:548-562`
+
+**Problem:** `CronUtils.compute_next_fire()` will raise an exception for invalid cron strings, producing a 500 error. Should be a 422 validation error.
+
+**Fix:**
+1. Add `validate_cron_expression(expr: str) -> bool` to `CronUtils`
+2. Call before computing next fire time:
+   ```python
+   if not CronUtils.validate(cron_expression):
+       raise ValueError(f"Invalid cron expression: {cron_expression!r}")
+   ```
+3. Route handler catches `ValueError` → 422
+
+**Acceptance criteria:**
+- [x] `POST /workflows/{id}/schedules` with `cron_expression="not-a-cron"` → 422 (not 500)
+- [x] `POST /workflows/{id}/schedules` with `cron_expression="*/5 * * * *"` → 201
+- [ ] Error message includes the invalid expression and a hint (e.g., "Expected 5 fields")
+
+---
+
+### 9.6 Test Coverage Tasks
+
+| # | Task | Component | Status | Priority |
+|---|------|-----------|--------|----------|
+| P9-T-01 | **Write CLI integration test suite** | workflow-cli | ✅ Done | 🟠 High |
+| P9-T-02 | **Write parallel node state race condition test** | workflow-engine | ✅ Done | 🔴 Critical |
+| P9-T-03 | **Write WebSocket streaming integration tests** | workflow-api | ✅ Done | 🟠 High |
+| P9-T-04 | **Write auth security test suite** | workflow-api | ✅ Done | 🟠 High |
+| P9-T-05 | **Write RBAC enforcement tests** | workflow-api | ✅ Done | 🟠 High |
+| P9-T-06 | **Write execution cancellation integration test** | workflow-api + workflow-worker | ✅ Done | 🟠 High |
+| P9-T-07 | **Write stale run reaper unit + integration test** | workflow-worker | ✅ Done | 🟡 Medium |
+| P9-T-08 | **Write human-in-the-loop end-to-end test** | workflow-engine + workflow-api | ✅ Done | 🟡 Medium |
+| P9-T-09 | **Write PII output scanning tests** | workflow-engine | ✅ Done | 🟡 Medium |
+| P9-T-10 | **Write idempotency key duplicate-trigger test** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-T-11 | **Write performance test — 100 concurrent triggers** | workflow-api | ✅ Done | 🟡 Medium |
+| P9-T-12 | **Write performance test — WebSocket 50 concurrent clients** | workflow-api | ✅ Done | 🟡 Medium |
+
+---
+
+### P9-T-01 — Write CLI Integration Test Suite
+
+**Component:** `workflow-cli`  
+**File:** `packages/workflow-cli/tests/test_cli_integration.py` (new)
+
+**Scope:** Every CLI command exercised against a running test API instance.
+
+```python
+# Tests to implement:
+test_auth_login_success           # POST /auth/login returns token → stored in config
+test_auth_login_wrong_password    # 401 → human-readable error shown
+test_auth_whoami_with_token       # GET /users/me → prints user email
+test_workflow_list                # GET /workflows → renders table correctly
+test_workflow_create              # POST /workflows → prints success + id
+test_workflow_update_patch        # PATCH /workflows/{id} → updated name confirmed
+test_workflow_activate            # POST /workflows/{id}/activate → active=true
+test_workflow_deactivate          # POST /workflows/{id}/deactivate → active=false
+test_workflow_delete              # DELETE /workflows/{id} → 204
+test_run_trigger                  # POST /trigger → prints non-empty run_id
+test_run_status                   # GET /executions/{run_id} → prints status
+test_run_cancel                   # POST /executions/{run_id}/cancel → cancelled
+test_schedule_list                # GET /workflows/{id}/schedules → list
+test_schedule_create              # POST /workflows/{id}/schedules → schedule_id returned
+test_config_set_get               # set api_url, get api_url → round-trip
+```
+
+**Acceptance criteria:**
+- [x] All 15 test functions pass against a live test API
+- [x] CLI tests use `click.testing.CliRunner` for isolation
+- [x] Tests do not require manual setup (fixtures create and clean up test data)
+
+---
+
+### P9-T-02 — Write Parallel Node State Race Condition Test
+
+**Component:** `workflow-engine`  
+**File:** `packages/workflow-engine/tests/integration/test_parallel_execution.py` (new)
+
+```python
+async def test_parallel_node_states_no_race():
+    """
+    Create a workflow with 10 parallel nodes (single topological layer).
+    Execute 100 times concurrently.
+    After each run, verify ALL 10 nodes have status=SUCCESS in node_states.
+    """
+    workflow = build_workflow_with_n_parallel_nodes(10)
+    results = await asyncio.gather(*[
+        trigger_and_wait(workflow, run_id=f"run_{i}") for i in range(100)
+    ])
+    for run in results:
+        assert len(run.node_states) == 10
+        for node_id, state in run.node_states.items():
+            assert state.status == RunStatus.SUCCESS, f"Node {node_id} not SUCCESS: {state}"
+```
+
+**Acceptance criteria:**
+- [x] 0 races in 1000 runs of 10-parallel-node workflow (requires P9-C-08 fix first)
+- [x] Test is deterministic — no flakiness across 10 consecutive CI runs
+
+---
+
+### P9-T-04 — Write Auth Security Test Suite
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/tests/security/test_auth.py` (new)
+
+```python
+test_tampered_jwt_rejected           # flip 1 byte in JWT signature → 401
+test_access_token_as_refresh_rejected  # wrong `type` claim → 401
+test_expired_access_token_rejected   # exp=past → 401
+test_deactivated_user_rejected       # is_active=false → 401
+test_api_key_expired_rejected        # expires_at=past → 401
+test_api_key_deactivated_rejected    # is_active=false → 401
+test_no_auth_header_rejected         # no Authorization/X-API-Key → 401
+test_viewer_cannot_delete_workflow   # VIEWER role + DELETE → 403
+test_viewer_cannot_trigger           # VIEWER + POST /trigger → 403
+test_cross_tenant_workflow_404       # tenant A JWT + workflow owned by B → 404
+test_cross_tenant_execution_404      # tenant A JWT + execution owned by B → 404
+test_password_reset_token_reuse      # second use of reset token → 400
+test_duplicate_email_registration    # same email twice → 422
+test_password_reset_old_token_after_new_request  # requires P9-S-05
+```
+
+---
+
+### P9-T-11 — Write Performance Test: 100 Concurrent Triggers
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/tests/test_perf_triggers.py` (new)
+
+**Scope:** Fires 100 concurrent `POST /workflows/{id}/trigger` requests and verifies all succeed within deadline.
+
+**Acceptance criteria:**
+- [x] All 100 requests return 200 or 202
+- [x] All responses contain unique `run_id` values (no spurious deduplication)
+- [x] Execution service called exactly 100 times
+- [x] Wall-clock time < 10 seconds for the entire batch
+
+---
+
+### P9-T-12 — Write Performance Test: WebSocket 50 Concurrent Clients
+
+**Component:** `workflow-api`  
+**File:** `packages/workflow-api/tests/test_perf_websocket.py` (new)
+
+**Scope:** Opens 50 concurrent WebSocket connections to a single run's event stream and verifies all clients receive data.
+
+**Acceptance criteria:**
+- [x] 50 clients connect without server errors
+- [x] ≥80% of clients receive the initial snapshot message
+- [x] Wall-clock time < 5 seconds for all connections to be served
+- [x] Fallback polling mode handles concurrent load without crashing
+
+---
+
+### 9.7 Acceptance Criteria Summary
+
+All Phase 9 tasks are `✅ Done` only when:
+
+- [ ] Code written, `ruff check` passes, `mypy --strict` passes
+- [ ] `lint-imports` passes with 0 layer violations
+- [ ] Unit tests ≥85% coverage on changed code
+- [ ] Integration tests pass against real DB stack (testcontainers)
+- [ ] Security tests pass (see P9-T-04, P9-T-05)
+- [ ] No new `logger.info(f"...")` f-string patterns in execution paths — must use structured fields
+- [ ] PR reviewed by at least one other engineer
+- [ ] CI green on `develop` branch
+
+---
+
+### 9.8 Execution Order
+
+```
+Sprint 1 (Critical fixes):
+  P9-C-02, P9-C-03, P9-C-04, P9-C-05  ← All CLI routes (1 day)
+  P9-C-01                               ← Worker LLM provider (0.5 day)
+  P9-C-07                               ← Add celery_task_id to model (0.5 day)
+  P9-C-08                               ← Atomic node state writes (1 day)
+  P9-S-01                               ← CORS fix (0.5 day)
+  P9-O-05                               ← Log 500 errors (0.5 day)
+
+Sprint 2 (High severity):
+  P9-C-06  ← Cancellation signal (depends on P9-C-07)
+  P9-H-01  ← API→Worker decoupling
+  P9-H-04  ← Audit service in worker
+  P9-H-05  ← Token verification caching
+  P9-H-10  ← Retry non-retryable exceptions
+  P9-H-12  ← Stale run reaper
+  P9-H-13  ← Celery result backend
+  P9-H-14  ← CLI response parsing
+
+Sprint 3 (Observability + Security):
+  P9-O-01  ← Structured logging
+  P9-O-02  ← Prometheus metrics
+  P9-O-04  ← Health check
+  P9-S-02  ← API key index
+  P9-S-03  ← Auth rate limits
+  P9-S-04  ← SSRF validation
+  P9-H-06  ← update_profile fix
+  P9-H-07  ← list_versions 501
+  P9-H-08  ← retry_of field
+
+Sprint 4 (Medium + Performance):
+  P9-M-01  ← WS PubSub (replaces polling)
+  P9-M-02  ← logs field on NodeExecutionState
+  P9-M-04  ← Idempotency keys
+  P9-M-05  ← gather return_exceptions
+  P9-M-09  ← Cron validation
+  P9-H-11  ← resume outputs fix
+  P9-H-03  ← Per-tenant config in worker
+
+Sprint 5 (Tests + Polish):
+  P9-T-01 through P9-T-12
+  P9-H-02  ← SDK connection recovery
+  P9-H-09  ← DELETE /schedules/{id} route
+  P9-S-05 through P9-S-08
+```

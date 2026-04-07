@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from workflow_engine.errors import NodeExecutionError, PIIBlockedError
+from workflow_engine.errors import NodeExecutionError, PIIBlockedError, SandboxTimeoutError
 from workflow_engine.execution import (
-    ContextManager, PIIScanner, RetryConfig, RetryHandler, 
+    ContextManager, PIIScanner, RetryConfig, RetryHandler,
     StateMachine, StateTransitionError, TimeoutManager
 )
 from workflow_engine.models import ExecutionRun, RunStatus, TenantConfig
@@ -31,6 +31,30 @@ class MockRepo(ExecutionRepository):
 
     async def list(self, tenant_id: str, workflow_id: str | None = None, skip: int = 0, limit: int = 100) -> list[ExecutionRun]:
         return list(self.runs.values())
+
+    async def get_node_states(self, tenant_id, run_id):
+        return []
+
+    async def list_runs_by_tenant(self, tenant_id, skip=0, limit=50):
+        return list(self.runs.values())
+
+    async def patch_fields(self, tenant_id, run_id, fields):
+        if run_id in self.runs:
+            for k, v in fields.items():
+                setattr(self.runs[run_id], k, v)
+
+    async def update_node_state(self, tenant_id, run_id, node_id, node_state):
+        run = self.runs.get(run_id)
+        if run:
+            run.node_states[node_id] = node_state
+
+    async def bulk_update_node_states(self, tenant_id, run_id, states):
+        run = self.runs.get(run_id)
+        if run:
+            run.node_states.update(states)
+
+    async def list_stale_running(self, before):
+        return []
 
 
 @pytest.mark.asyncio
@@ -94,7 +118,7 @@ async def test_timeout_manager():
         await asyncio.sleep(0.5)
         return "DONE"
 
-    with pytest.raises(NodeExecutionError, match="exceeded timeout"):
+    with pytest.raises(SandboxTimeoutError, match="exceeded timeout"):
         await TimeoutManager.wrap(slow_task(), 0.1, "node1")
 
 

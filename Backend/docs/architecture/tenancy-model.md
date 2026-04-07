@@ -42,7 +42,7 @@ TenantRegistry.resolve(tenant_id)
                redis_url,          ← shared cluster or dedicated
                s3_bucket,          ← shared bucket (tenant prefix) or dedicated
                home_region,        ← us-east-1 | eu-west-1 | ap-southeast-1
-               pii_policy,         ← SCAN_WARN | SCAN_MASK | SCAN_BLOCK
+               pii_policy,         ← DISABLED | SCAN_WARN | SCAN_MASK | SCAN_BLOCK (default: SCAN_WARN)
                retention_days,     ← 30 | 90 | 365 | custom
                max_concurrent_runs,
                monthly_exec_quota
@@ -166,33 +166,54 @@ Notify tenant: dedicated infrastructure ready
 
 ## 6. EngineConfig Injection
 
-The SDK itself has no knowledge of tenancy. The correct `EngineConfig` is built per-request by the API and injected into every SDK call:
+The SDK itself has no knowledge of tenancy. `EngineConfig` uses nested sub-configs and is initialised **once at process startup** from environment variables. Per-execution tenant context is resolved separately as `TenantConfig`.
+
+### EngineConfig structure (config.py)
 
 ```python
-# workflow-api/dependencies.py
+class EngineConfig(BaseSettings):
+    storage:   StorageConfig        # mongodb_url, postgres_url, redis_url, s3_bucket, aws_region
+    tenant:    TenantContextConfig  # tenant_id, pii_policy (per-request context only)
+    providers: LLMProvidersConfig   # google_api_key, anthropic_api_key, openai_api_key, bedrock_region
+    sandbox:   SandboxConfig        # sandbox_timeout_seconds, sandbox_max_memory_mb, …
+    context_inline_threshold_kb: int = 64
+    # …other platform-level settings
+```
 
-async def get_engine_config(
-    tenant: Tenant = Depends(get_current_tenant),
-    secrets: SecretsManager = Depends(get_secrets_manager),
-) -> EngineConfig:
-    if tenant.isolation_model == IsolationModel.DEDICATED:
-        mongodb_url = await secrets.get(f"tenant/{tenant.id}/mongodb_url")
-        redis_url = await secrets.get(f"tenant/{tenant.id}/redis_url")
-        s3_bucket = f"workflow-{tenant.slug}-{tenant.home_region}"
-    else:
-        mongodb_url = settings.SHARED_MONGODB_URL
-        redis_url = settings.SHARED_REDIS_URL
-        s3_bucket = settings.SHARED_S3_BUCKET
+### Startup (API / Worker)
 
-    return EngineConfig(
-        mongodb_url=mongodb_url,
-        redis_url=redis_url,
-        s3_bucket=s3_bucket,
-        tenant_id=tenant.id,
-        pii_policy=tenant.pii_policy,
-        sandbox_timeout_seconds=30,
-        context_inline_threshold_kb=64,
-    )
+```python
+# Both workflow-api and workflow-worker initialise sub-configs from env vars at startup
+storage_config = StorageConfig()      # reads MONGODB_URL, POSTGRES_URL, REDIS_URL, S3_BUCKET
+llm_config     = LLMProvidersConfig() # reads GOOGLE_API_KEY, ANTHROPIC_API_KEY, …
+repos          = await RepositoryFactory.create_all(storage_config)
+```
+
+### Per-execution tenant resolution (Worker)
+
+```python
+# workflow-worker/dependencies.py
+async def get_tenant_config(sdk: dict, tenant_id: str) -> TenantConfig:
+    """
+    Fetches TenantConfig from PostgreSQL (cached in Redis for 5 min).
+    Returns FREE-tier defaults if tenant not found.
+    """
+    # Redis cache key: tenant_config:{tenant_id}
+    # Falls back to DB → TenantConfig(tenant_id, plan_tier, isolation_model, pii_policy, quotas)
+
+orchestrator = build_orchestrator(sdk, tenant_config)
+# RunOrchestrator receives TenantConfig directly — no EngineConfig per-execution
+```
+
+### TenantConfig fields
+
+```python
+class TenantConfig(BaseModel):
+    tenant_id:       str           # required
+    plan_tier:       PlanTier      # FREE | STARTER | PRO | ENTERPRISE
+    isolation_model: IsolationModel # SHARED | DEDICATED
+    pii_policy:      PIIPolicy     # DISABLED | SCAN_WARN | SCAN_MASK | SCAN_BLOCK (default: SCAN_WARN)
+    quotas:          dict[str, int] # plan-tier execution limits
 ```
 
 ---

@@ -22,14 +22,14 @@ types/chat.ts                             ← TypeScript interfaces
 
 **Tech choices locked:**
 - `useChatStore` (Zustand) — owns all chat state; `workflowStore.loadFromDefinition()` called when workflow ready
-- `useChatWebSocket` — native WebSocket, reconnects with 3s backoff; routes `token | done | phase_change | workflow_ready` events
+- `useChatWebSocket` — native WebSocket, reconnects with 3s backoff; routes `status | phase | response` events (no token streaming — fetch full payload from REST after `response`)
 - `ChatGeneratedNode` — coloured header from `ui_config.color`, Lucide icon from `ui_config.icon`, config preview pills, conditional port handles based on `is_terminal`
 - `ClarificationCard` — React Hook Form; question type → widget: `text→Textarea`, `select→Select`, `multiselect→CheckboxGroup`, `boolean→Switch`, `number→Input`
 - Canvas edits debounced 1s → `PUT /chat/sessions/{id}/workflow` → validation errors highlight nodes red, suggestions render as dismissible toasts
 - Empty canvas shows prompt suggestion chips (4 starters); clicking one sends the prompt and creates a session automatically
 
 **Acceptance criteria:**
-- [ ] WebSocket token streaming renders text incrementally — no full re-render
+- [ ] WebSocket `status` event shows typing indicator; `response` event triggers REST fetch for full payload
 - [ ] `ClarificationCard` renders correct input widget per `input_type`
 - [ ] Submitting all clarification answers via form auto-sends a message with answers formatted
 - [ ] `RequirementProgressBar` shows correct filled/missing fields from `requirement_spec`
@@ -956,12 +956,14 @@ theme: {
    └─ Empty canvas + prompt suggestions shown
 
 2. User clicks a suggestion / types a query
-   └─ appendUserMessage() → ChatInputBar disabled
-   └─ WebSocket connects → tokens stream into StreamingText
-   └─ TypingIndicator shown
+   └─ POST /api/v1/chat/sessions/{id}/message sent
+   └─ ChatInputBar disabled
+   └─ WebSocket emits `status` (phase=PROCESSING) → TypingIndicator shown
+   └─ WebSocket emits `phase` (phase=CLARIFYING|GENERATING) as orchestrator progresses
 
 3. Backend returns phase: CLARIFYING
-   └─ commitStreamedMessage() → full assistant bubble rendered
+   └─ GET full session → ChatMessageResponse parsed
+   └─ assistantBubble rendered with message text
    └─ ClarificationCard appears with QuestionWidget per question
    └─ PhaseIndicator animates: GATHERING → CLARIFYING
 
@@ -974,8 +976,9 @@ theme: {
    └─ PhaseIndicator: CLARIFYING → GENERATING
    └─ Canvas shows loading skeleton overlay
 
-6. WebSocket emits workflow_ready
-   └─ workflowStore.loadFromDefinition(preview)
+6. WebSocket emits `response` (phase=COMPLETE, workflow_id)
+   └─ GET /api/v1/chat/sessions/{id} → full ChatMessageResponse with workflow_preview
+   └─ workflowStore.loadFromDefinition(workflow_preview)
    └─ Canvas renders nodes + edges with correct ui_config colors
    └─ Phase: COMPLETE
    └─ "Edit in Canvas" button activates

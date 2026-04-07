@@ -66,7 +66,7 @@ docs/
 ## Technology Stack Summary
 
 ```
-Backend SDK:   Python 3.12 · Pydantic v2 · httpx · motor · aioredis · asyncpg
+Backend SDK:   Python 3.12 · Pydantic v2 · httpx · motor · redis[asyncio] · asyncpg
 API:           FastAPI · Uvicorn · Celery · Redis
 Frontend:      Next.js 14 · TypeScript · React Flow · Zustand · TanStack Query
                Monaco Editor · Tailwind CSS · shadcn/ui

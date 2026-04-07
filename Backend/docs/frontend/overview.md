@@ -26,7 +26,7 @@
 
 ### F-4 — Execution Monitor + Live Updates
 
-**Deliverables:** Execution list page, run detail page showing node graph with live status overlays. WebSocket client consuming `WS /ws/executions/{run_id}`. Log viewer with level filter.
+**Deliverables:** Execution list page, run detail page showing node graph with live status overlays. WebSocket client consuming `WS /api/v1/ws/executions/{run_id}`. Log viewer with level filter.
 
 ### F-5 — TransformNode Monaco Editor
 
@@ -244,14 +244,15 @@ interface WorkflowStore {
 ## 5. Node Status Visualization
 
 ```typescript
+// Node/run statuses from RunStatus enum — these are the only valid values.
+// There is no RETRYING, SKIPPED, or SUSPENDED status in the current implementation.
 const nodeStatusStyles: Record<NodeStatus, NodeStyle> = {
-  PENDING:   { ring: 'ring-gray-300',   dot: 'bg-gray-400',   animate: null },
-  RUNNING:   { ring: 'ring-blue-400',   dot: 'bg-blue-500',   animate: 'animate-pulse' },
-  SUCCESS:   { ring: 'ring-green-400',  dot: 'bg-green-500',  animate: null },
-  FAILED:    { ring: 'ring-red-400',    dot: 'bg-red-500',    animate: null },
-  RETRYING:  { ring: 'ring-yellow-400', dot: 'bg-yellow-500', animate: 'animate-spin' },
-  SKIPPED:   { ring: 'ring-gray-200',   dot: 'bg-gray-300',   opacity: 'opacity-50' },
-  SUSPENDED: { ring: 'ring-orange-400', dot: 'bg-orange-400', animate: 'animate-bounce' },
+  QUEUED:        { ring: 'ring-gray-300',   dot: 'bg-gray-400',   animate: null },
+  RUNNING:       { ring: 'ring-blue-400',   dot: 'bg-blue-500',   animate: 'animate-pulse' },
+  SUCCESS:       { ring: 'ring-green-400',  dot: 'bg-green-500',  animate: null },
+  FAILED:        { ring: 'ring-red-400',    dot: 'bg-red-500',    animate: null },
+  CANCELLED:     { ring: 'ring-gray-400',   dot: 'bg-gray-500',   animate: null },
+  WAITING_HUMAN: { ring: 'ring-orange-400', dot: 'bg-orange-400', animate: 'animate-bounce' },
 };
 ```
 
@@ -281,17 +282,20 @@ Logout:
 
 ```typescript
 // types/api.ts
+// These match the exact payloads published by RunOrchestrator to
+// Redis PubSub channel `run:{run_id}:events` and fanned out by the WS hub.
 
 type WsEvent =
-  | { type: 'RUN_STARTED';    run_id: string; started_at: string }
-  | { type: 'RUN_COMPLETED';  run_id: string; status: 'SUCCESS' | 'FAILED'; ended_at: string }
-  | { type: 'NODE_STARTED';   run_id: string; node_id: string; started_at: string }
-  | { type: 'NODE_COMPLETED'; run_id: string; node_id: string; status: NodeStatus; ended_at: string; output_preview?: string }
-  | { type: 'NODE_FAILED';    run_id: string; node_id: string; error: string; retry_count: number }
-  | { type: 'NODE_LOG';       run_id: string; node_id: string; level: 'INFO' | 'WARN' | 'ERROR'; message: string }
-  | { type: 'HUMAN_WAITING';  run_id: string; node_id: string; form_schema: object; assignee: string }
-  | { type: 'HEARTBEAT';      timestamp: string };
+  | { type: 'node_state';        node_id: string; status: 'RUNNING' | 'SUCCESS' | 'FAILED'; ts: string }
+  | { type: 'run_complete';      status: 'SUCCESS' | 'FAILED'; ts: string }
+  | { type: 'run_waiting_human'; node_id: string; ts: string }
 ```
+
+> **Event naming:** Types are lowercase snake_case. There is no `RUN_STARTED`, `NODE_LOG`, `HEARTBEAT`,
+> or `HUMAN_WAITING` event in v1.0. The `node_state` event covers both node-started (status=RUNNING)
+> and node-finished (status=SUCCESS or FAILED). `run_waiting_human` fires when a HumanInputNode
+> pauses the run — the frontend should prompt the user to provide input via
+> `POST /api/v1/executions/human-input`.
 
 ---
 

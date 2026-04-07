@@ -1,36 +1,42 @@
 # Execution Engine — Overview
 ## Tiered Isolation + Run Lifecycle
 
+**Last updated:** 2026-04-07 — aligned with implemented codebase (`workflow-engine v1.0.0`)
+
 ---
 
 ## 1. Execution Architecture
 
 The execution engine is split into two concerns:
-- **Orchestration** — `RunOrchestrator` drives the DAG, manages state, routes nodes. Runs on shared worker infrastructure.
-- **Node Execution** — Each node runs in an isolation tier appropriate to its type. Containers and VMs are ephemeral — created per execution, destroyed immediately after.
+- **Orchestration** — `RunOrchestrator` drives the DAG, manages state, publishes events. Lives in `workflow_engine.execution.orchestrator`.
+- **Node Execution** — Each node's `execute()` method runs under a timeout and optional retry. `CodeExecutionNode` uses the RestrictedPython sandbox (Tier 1).
 
 ```
-workflow-worker (Celery task)
+workflow-worker (Celery: execute_workflow task)
          │
          ▼
-RunOrchestrator.run(run_id, definition, engine_config)
+build_orchestrator(sdk, tenant_config) → RunOrchestrator
          │
-         ├─ DAGParser.parse(definition)  → ExecutionPlan
+         ▼
+orchestrator.run(
+    workflow_def,        # WorkflowDefinition
+    run_id,              # str
+    tenant_id,           # str
+    trigger_input,       # dict
+)
+         │
+         ├─ GraphBuilder.topological_layers(workflow_def)  → list[list[str]]
          ├─ StateMachine.transition_run(RUNNING)
-         ├─ EventBus.publish(RunStarted)
          │
-         └─ For each ExecutionStep in plan:
-               │
-               ├─ SEQUENTIAL step:
-               │   NodeExecutor.execute(node, inputs, context, services)
-               │           │
-               │           └─ SandboxManager.route(node_type)
-               │                   → Tier 0/1/2/3 execution
-               │
-               └─ PARALLEL step:
-                   Celery group(execute_single_node.s(...) for each node)
-                   chord → fan-in node execution on completion
+         └─ for layer in topo_layers:
+               asyncio.gather(
+                   *[_process_node(node_id) for node_id in layer],
+                   return_exceptions=True,
+               )
+               bulk_update_node_states(...)   ← 1 MongoDB $set per layer
 ```
+
+Parallel nodes in the same topological layer run concurrently via `asyncio.gather()` — **not** Celery group/chord. This runs entirely within a single Celery task / worker process.
 
 ---
 
@@ -39,330 +45,300 @@ RunOrchestrator.run(run_id, definition, engine_config)
 ### Tier 0 — Direct In-Process Execution
 
 ```
-Nodes: TriggerNode, LogicNode, HumanNode
+Nodes: ManualTriggerNode, ScheduledTriggerNode, IntegrationTriggerNode,
+       ControlFlowNode, NoteNode, OutputNode, SetStateNode, TemplatingNode
 Overhead: ~0ms
-Security: N/A — these nodes run only platform code, never user logic
+Security: N/A — these nodes run only platform code, never user-supplied logic
 ```
 
-No sandbox, no container. The node's `execute()` method is called directly on the worker process. These nodes contain zero user-provided code — all logic is written and controlled by the platform team.
+No sandbox. The node's `execute()` method is called directly on the worker. These nodes contain zero user-provided code.
 
 ---
 
 ### Tier 1 — RestrictedPython (In-Process Sandbox)
 
 ```
-Nodes: AINode (prompt rendering), APINode (template rendering), TransformNode (template mode)
+Nodes: CodeExecutionNode
 Overhead: ~5–15ms
-Security: AST-level restriction — no system access, no imports, no I/O
+Security: AST-level restriction — blocked imports (os, sys, subprocess, socket, shutil,
+          importlib, ctypes), RestrictedPython safe_globals, timeout via asyncio.wait_for
 ```
 
-**Implementation:**
+**Implementation (CodeExecutionNode):**
 ```python
-# engine/sandbox/restricted.py
+# nodes/implementations/code_execution.py
 
-from RestrictedPython import compile_restricted, safe_globals, safe_builtins
+# 1. Static AST scan blocks dangerous imports before execution
+_BLOCKED_MODULES = frozenset({"os", "sys", "subprocess", "socket", "shutil", "importlib", "ctypes"})
 
-class RestrictedPythonSandbox:
-    BLOCKED_BUILTINS = {"open", "exec", "eval", "__import__", "compile", "globals", "locals"}
-    MAX_ITERATIONS = 10_000
+# 2. Compile with RestrictedPython
+byte_code = compile_restricted(code, filename="<CodeExecutionNode>", mode="exec")
 
-    def execute(self, code: str, input_data: dict, timeout_seconds: int = 2) -> dict:
-        safe_env = {
-            "__builtins__": {k: v for k, v in safe_builtins.items()
-                            if k not in self.BLOCKED_BUILTINS},
-            "input": input_data,
-            "output": {},
-            "_getiter_": self._iteration_guard(self.MAX_ITERATIONS),
-            "_getattr_": getattr,
-        }
-        try:
-            compiled = compile_restricted(code, filename="<transform>", mode="exec")
-            with asyncio.timeout(timeout_seconds):
-                exec(compiled, safe_env)
-            return safe_env["output"]
-        except TimeoutError:
-            raise SandboxTimeoutError(f"Code exceeded {timeout_seconds}s timeout")
-        except Exception as e:
-            raise NodeExecutionError(f"Code execution failed: {e}")
+# 3. Execute in restricted environment
+local_vars = {
+    "input": context.input_data,   # node's resolved inputs
+    "output": None,                # user sets this
+    "_getitem_": lambda obj, key: obj[key],
+    "_getiter_": iter,
+    "_getattr_": getattr,
+}
+exec(byte_code, restricted_globals, local_vars)
+
+# 4. Return output
+return NodeOutput(outputs={"output": local_vars.get("output")})
 ```
+
+Timeout is enforced by `TimeoutManager.wrap()` which raises `SandboxTimeoutError` (not `NodeExecutionError`) on expiry.
 
 ---
 
-### Tier 2 — gVisor Container (User-Space Kernel)
+### Tier 2 — gVisor Container *(planned, not yet implemented)*
 
 ```
-Nodes: TransformNode (Python mode), MCPNode
+Nodes: Reserved for future TransformNode (Python mode), MCPNode
 Overhead: ~80–150ms (mitigated by warm pool)
 Security: gVisor intercepts all syscalls — no host kernel access possible
+Status: sandbox/__init__.py is a placeholder; CodeExecutionNode uses Tier 1 for all user code today
 ```
-
-**Container specification:**
-```yaml
-# Applied to every Tier 2 execution container
-runtime: runsc          # gVisor runtime
-resources:
-  limits:
-    memory: "512Mi"
-    cpu: "500m"
-  requests:
-    memory: "128Mi"
-    cpu: "100m"
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 65534        # nobody
-  readOnlyRootFilesystem: true
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop: ["ALL"]
-networkPolicy:
-  egress:
-    - to: []              # all outbound blocked by default
-      ports: []           # unless explicitly whitelisted in node config
-volumeMounts:
-  - name: tmp
-    mountPath: /tmp       # only writable location
-    sizeLimit: "50Mi"
-```
-
-**Execution flow:**
-```python
-# engine/sandbox/container.py
-
-class GVisorSandbox:
-    def __init__(self, warm_pool: ContainerWarmPool):
-        self.warm_pool = warm_pool
-
-    async def execute(self, code: str, input_data: dict, limits: SandboxLimits) -> dict:
-        container = await self.warm_pool.acquire()
-        try:
-            await container.inject_input({"code": code, "input": input_data})
-            result = await container.run(timeout=limits.timeout_seconds)
-            return result["output"]
-        except ContainerTimeoutError:
-            raise SandboxTimeoutError(f"Execution exceeded {limits.timeout_seconds}s")
-        finally:
-            await self.warm_pool.release_and_replenish(container)
-```
-
-**Warm Pool:**
-- Maintains N pre-warmed gVisor containers (configurable, default: 10 per worker pod)
-- Container is acquired at execution start, released and immediately replaced after
-- Eliminates 150ms startup overhead for high-frequency workflows
-- Containers are rotated every 50 executions to prevent state accumulation
 
 ---
 
-### Tier 3 — Firecracker MicroVM
+### Tier 3 — Firecracker MicroVM *(planned, not yet implemented)*
 
 ```
-Nodes: Reserved for future ENTERPRISE-only high-risk scenarios
-Overhead: ~125–200ms (mitigated by VM warm pool)
+Nodes: Reserved for ENTERPRISE-only high-risk scenarios
+Overhead: ~125–200ms
 Security: Full VM isolation — separate kernel, separate memory space
 Available: ENTERPRISE and DEDICATED plans only
-```
-
-**Firecracker configuration:**
-```json
-{
-  "boot-source": {
-    "kernel_image_path": "/var/lib/firecracker/kernel/vmlinux",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off"
-  },
-  "drives": [
-    {
-      "drive_id": "rootfs",
-      "path_on_host": "/var/lib/firecracker/rootfs/ubuntu-22.04.ext4",
-      "is_root_device": true,
-      "is_read_only": true
-    }
-  ],
-  "machine-config": {
-    "vcpu_count": 1,
-    "mem_size_mib": 512,
-    "track_dirty_pages": false
-  },
-  "network-interfaces": [
-    {
-      "iface_id": "eth0",
-      "guest_mac": "AA:FC:00:00:00:01",
-      "host_dev_name": "tap0"
-    }
-  ]
-}
+Status: Not implemented in v1.0
 ```
 
 ---
 
-## 3. Execution Lifecycle (Full 24-Step Flow)
+## 3. Execution Lifecycle (End-to-End Flow)
 
 ```
-Step  Component         Action                                     SDK Module
-────  ─────────         ──────                                     ──────────
- 1    UI/CLI            POST /api/v2/workflows {definition JSON}   —
- 2    API               Validate JWT / API key                     engine.auth
- 3    API               Resolve tenant → EngineConfig              TenantRegistry
- 4    API               engine.validation.validate(definition)     validation
- 5    API               engine.versioning.create_version()         versioning
- 6    API               MongoDB: upsert workflows collection       —
- 7    UI/CLI            POST /api/v2/executions {workflow_id}      —
- 8    API               engine.billing.quota_checker.check()       billing
- 9    API               Redis INCR semaphore (concurrency check)   —
-10    API               engine.versioning.pin_for_execution()      versioning
-11    API               engine.privacy.scan_dict(input)            privacy
-12    API               MongoDB insert ExecutionRun (QUEUED)       models
-13    API               Celery: orchestrate_run.delay(run_id)      —
-14    Worker            engine.dag.DAGParser().parse(definition)   dag
-15    Worker            engine.state.transition_run(RUNNING)       state
-16    Worker            engine.events.EventBus.publish(RunStarted) events → Redis → WS → UI
-17    Worker (loop)     engine.context.resolve_inputs(node_id)     context
-18    Worker (loop)     SandboxManager.route(node_type) → tier     sandbox
-19    Worker (AI)       engine.cache.check_semantic(prompt)        cache
-20    Worker (AI)       engine.providers.rate_limiter.acquire()    providers
-21    Worker (AI)       engine.providers.router.generate()         providers → LLM API
-22    Worker (tool)     engine.integrations.tool_executor.execute() integrations
-23    Worker            engine.context.store_output(node_id, out)  context → Redis/S3
-24    Worker            engine.state.transition_run(SUCCESS/FAILED) state + events → UI
-25    Worker            engine.billing.usage_tracker.record()      billing
-26    Worker            cleanup_run.delay() → release semaphore    —
+Step  Layer      Component                   Action
+────  ─────      ─────────                   ──────
+ 1    UI/CLI     POST /api/v1/workflows/{id}/trigger { input_data }
+ 2    API        auth middleware              Validate JWT — extract user_id + tenant_id
+ 3    API        execution_service.trigger() Create ExecutionRun (status=QUEUED) in MongoDB
+ 4    API        execute_workflow.delay()     Celery task enqueued to Redis
+ 5    API        →                           Return 202 { run_id, status: "queued" }
+
+ 6    Worker     execute_workflow (Celery)    Fetch run + workflow from MongoDB
+ 7    Worker     get_tenant_config()          Load TenantConfig (pii_policy, plan_tier, quotas)
+ 8    Worker     build_orchestrator()         Construct RunOrchestrator(repo, services, config)
+ 9    Worker     orchestrator.run()           Begin DAG traversal
+
+10   Orchestrator GraphBuilder.topological_layers()  Build per-layer node groups
+11   Orchestrator StateMachine.transition_run(RUNNING)
+12   Orchestrator Redis PubSub publish         { type: "node_state", node_id, status: "RUNNING" }
+
+13   Orchestrator [loop per layer]
+14   Orchestrator asyncio.gather(nodes in layer)  Parallel node execution within single worker
+15   Orchestrator [per node] ContextManager.resolve_inputs()  Walk edges → build input dict
+16   Orchestrator [per node] PIIScanner.scan_dict(inputs, config)  Block/mask/warn per policy
+17   Orchestrator [per node] StateMachine.transition_node(RUNNING)
+18   Orchestrator [per node] TimeoutManager.wrap(execute(), timeout, node_id)
+19   Orchestrator [per node] RetryHandler.execute_with_retry(attempt_fn, RetryConfig)
+20   Orchestrator [per node] node_impl.execute(config, context, services)  → NodeOutput
+21   Orchestrator [per node] PIIScanner.scan_dict(output)   Scan outputs too
+22   Orchestrator [per layer] bulk_update_node_states(states_dict)  1 MongoDB $set per layer
+
+23   Orchestrator [on complete] StateMachine.transition_run(SUCCESS)
+24   Orchestrator Redis PubSub publish  { type: "run_complete", status: "SUCCESS" }
+25   Worker       Celery task completes
+```
+
+**Human-in-the-loop pause (step 20 variant):**
+```
+node returns metadata.status == "WAITING_HUMAN"
+    → StateMachine.transition_run(WAITING_HUMAN)
+    → Redis publish { type: "run_waiting_human", node_id }
+    → Celery task ends (run is paused)
+
+Resume via: POST /api/v1/executions/human-input { run_id, node_id, response }
+    → execute_workflow.delay(..., resume_node=node_id, human_response={...})
+    → orchestrator.resume(tenant_id, run_id, node_id, workflow_def, human_response)
+    → builds sub-workflow of all descendants and recurses into .run()
 ```
 
 ---
 
-## 4. Parallel Execution
-
-When the `DAGParser` detects parallel branches (nodes with no dependency on each other), the `RunOrchestrator` dispatches them as a Celery group/chord:
+## 4. Per-Node Execution Detail
 
 ```python
-# engine/executor/orchestrator.py
+# orchestrator.py — simplified _process_node()
 
-async def _execute_parallel_step(
-    self,
-    step: ExecutionStep,
-    run_id: str,
-    definition: WorkflowDefinition,
-) -> None:
-    # Dispatch all parallel nodes as a Celery group
-    parallel_group = group(
-        execute_single_node.s(
-            run_id=run_id,
-            node_id=node_id,
-            definition_dict=definition.model_dump(),
-            trace_ctx=get_current_trace_context(),
-        )
-        for node_id in step.node_ids
+async def _process_node(node_id: str):
+    run_state = await self.repo.get(tenant_id, run_id)
+    if run_state.status == RunStatus.CANCELLED:
+        return False                      # abort silently
+
+    node_def = workflow_def.nodes[node_id]
+    node_impl = NodeTypeRegistry.get(NodeType(node_def.type))()
+
+    if not node_impl.is_executable:       # NoteNode → skip
+        return False
+
+    inputs = await ctx_manager.resolve_inputs(tenant_id, node_id, workflow_def, outputs)
+    PIIScanner.scan_dict(inputs, self.config)   # raises PIIBlockedError on SCAN_BLOCK
+
+    await StateMachine.transition_node(repo, tenant_id, run_id, node_id, RunStatus.RUNNING)
+
+    timeout = int(node_def.config.get("timeout_seconds", 30))
+    retries = int(node_def.config.get("max_retries", 1))
+
+    async def _attempt():
+        return await TimeoutManager.wrap(_execute_loop(), timeout, node_id)
+
+    rc = RetryConfig(
+        max_attempts=retries,
+        non_retryable=(SandboxTimeoutError, PIIBlockedError, NodeExecutionError),
     )
+    result = await RetryHandler.execute_with_retry(_attempt, rc)
 
-    # chord: run fan-in node after all parallel nodes complete
-    if step.fan_in_node_id:
-        chord(parallel_group)(
-            execute_single_node.s(
-                run_id=run_id,
-                node_id=step.fan_in_node_id,
-                definition_dict=definition.model_dump(),
-                trace_ctx=get_current_trace_context(),
-            )
-        )
-    else:
-        parallel_group.apply_async()
+    # Buffer successful state — flushed as bulk_update at end of layer
+    layer_success_buffer[node_id] = NodeExecutionState(status=RunStatus.SUCCESS, ...)
 ```
 
 ---
 
-## 5. Retry and Timeout
+## 5. Input Resolution (ContextManager)
 
-### Retry Policy
+Edge resolution rules:
+- `source_port = "payload"` (named port) → extracts `source_outputs["payload"]`
+- `source_port = "default"` → passes the entire source output dict
+- `target_port = "mykey"` (named) → `inputs["mykey"] = value`
+- `target_port = "default"` → `inputs.update(value)` (spread dict into top-level)
+
 ```python
-# engine/executor/retry.py
+# context_manager.py
 
-@dataclass
-class RetryConfig:
-    max_attempts: int = 3
-    initial_delay_seconds: float = 1.0
-    multiplier: float = 2.0
-    max_delay_seconds: float = 60.0
-    jitter: bool = True
+for edge in [e for e in definition.edges if e.target_node == node_id]:
+    source_data = run_state_outputs.get(edge.source_node, {})
+    if edge.source_port and edge.source_port != "default":
+        value = source_data.get(edge.source_port)
+    else:
+        value = source_data                         # pass all outputs
 
-class RetryHandler:
-    def compute_backoff(self, attempt: int, config: RetryConfig) -> float:
-        delay = min(
-            config.initial_delay_seconds * (config.multiplier ** (attempt - 1)),
-            config.max_delay_seconds,
-        )
-        if config.jitter:
-            delay *= random.uniform(0.8, 1.2)
-        return delay
+    if edge.target_port and edge.target_port != "default":
+        inputs[edge.target_port] = value
+    else:
+        if isinstance(value, dict):
+            inputs.update(value)                    # spread into top-level
+        else:
+            inputs["default"] = value
 ```
 
-### Timeout Management
+Large outputs (>64KB) are offloaded to S3 and replaced with `{"__blob": "s3://path"}` inline.
+
+---
+
+## 6. Retry and Timeout
+
+### RetryConfig defaults
+
 ```python
-# engine/executor/timeout.py
+RetryConfig(
+    max_attempts=1,                 # per node_def.config["max_retries"]
+    initial_delay_seconds=1.0,
+    multiplier=2.0,
+    max_delay_seconds=60.0,
+    jitter=True,
+    non_retryable=(SandboxTimeoutError, PIIBlockedError, NodeExecutionError),
+)
+```
+
+`SandboxTimeoutError`, `PIIBlockedError`, and `NodeExecutionError` are **never retried** — they fail the node immediately.
+
+### TimeoutManager
+
+```python
+# retry_timeout.py
 
 class TimeoutManager:
-    async def wrap(
-        self,
-        coro: Coroutine,
-        timeout_seconds: float,
-        node_id: str,
-    ) -> Any:
+    @classmethod
+    async def wrap(cls, coro, timeout_seconds, node_id):
         try:
             return await asyncio.wait_for(coro, timeout=timeout_seconds)
         except asyncio.TimeoutError:
-            raise NodeExecutionError(
-                f"Node {node_id} exceeded timeout of {timeout_seconds}s",
-                node_id=node_id,
+            raise SandboxTimeoutError(          # ← NOT NodeExecutionError
+                message=f"Node {node_id} exceeded timeout of {timeout_seconds}s"
             )
 ```
 
-**Default timeouts by node type:**
-| Node Type | Default Timeout | Maximum |
-|---|---|---|
-| TriggerNode | 5s | 10s |
-| LogicNode | 10s | 30s |
-| AINode | 60s | 300s |
-| APINode | 30s | 120s |
-| TransformNode (Tier 1) | 5s | 30s |
-| TransformNode (Tier 2) | 30s | 120s |
-| MCPNode | 30s | 120s |
-| HumanNode | 86400s (24h) | 604800s (7 days) |
+Default timeout per node: `node_def.config.get("timeout_seconds", 30)`.
 
 ---
 
-## 6. State Machine
+## 7. State Machine
+
+Valid run status transitions (enforced by `StateMachine`):
 
 ```
-Run States:
-  QUEUED → RUNNING → SUCCESS
-                   → FAILED
-                   → CANCELLED
-         → WAITING_HUMAN (HumanNode paused)
-
-Node States:
-  PENDING → RUNNING → SUCCESS
-                    → FAILED
-                    → RETRYING → RUNNING (retry loop)
-           → SKIPPED (conditional branch not taken)
-           → SUSPENDED (HumanNode waiting)
+QUEUED        → RUNNING, CANCELLED
+RUNNING       → SUCCESS, FAILED, CANCELLED, WAITING_HUMAN
+WAITING_HUMAN → RUNNING, CANCELLED
+SUCCESS       → (terminal — no further transitions)
+FAILED        → (terminal)
+CANCELLED     → (terminal)
 ```
 
-All state transitions are enforced by `StateMachine.transition_run()` and `transition_node()`. Invalid transitions raise `StateTransitionError`. Transitions are written to MongoDB with optimistic locking (version field).
+Invalid transitions raise `StateTransitionError`. Node states use the same `RunStatus` enum (QUEUED/RUNNING/SUCCESS/FAILED/CANCELLED/WAITING_HUMAN). There is no RETRYING, SKIPPED, or SUSPENDED state in the current implementation.
 
 ---
 
-## 7. Dead Letter Queue
+## 8. Redis PubSub Events
 
-Tasks that fail after all retry attempts are written to the DLQ:
+The orchestrator publishes events to `run:{run_id}:events` for WebSocket fan-out:
 
-```
-Redis key: dlq:{task_id}
-Value: {
-    task_name:   "orchestrate_run",
-    task_kwargs: { run_id, definition_dict },
-    error:       "NodeExecutionError: ...",
-    traceback:   "...",
-    failed_at:   "2024-01-15T10:30:00Z",
-    attempt:     3
-}
-TTL: 7 days
+```python
+# Event types published by orchestrator.py
+{ "type": "node_state",        "node_id": "...", "status": "RUNNING",  "ts": "..." }
+{ "type": "node_state",        "node_id": "...", "status": "SUCCESS",  "ts": "..." }
+{ "type": "node_state",        "node_id": "...", "status": "FAILED",   "ts": "..." }
+{ "type": "run_complete",      "status": "SUCCESS",                     "ts": "..." }
+{ "type": "run_complete",      "status": "FAILED",                      "ts": "..." }
+{ "type": "run_waiting_human", "node_id": "...",                        "ts": "..." }
 ```
 
-Admin UI shows DLQ entries with manual re-trigger capability.
+Redis publish errors are silently swallowed — a Redis outage does not fail the execution.
+
+---
+
+## 9. Dead Letter Queue
+
+Failed Celery tasks (after all retries exhausted) call `handle_dlq`:
+
+```python
+# workflow-worker/tasks.py
+
+@app.task(name="workflow_worker.tasks.dead_letter_queue")
+def handle_dlq(failed_task_name: str, args: list, kwargs: dict):
+    sdk = run_async(get_engine())
+    audit = sdk.get("audit")
+    if audit:
+        run_async(audit.write(
+            tenant_id=...,
+            event_type="task.failed",
+            detail={"task": failed_task_name, "args": args, "kwargs": kwargs},
+        ))
+```
+
+DLQ entries are written to the audit log (MongoDB). There is no separate Redis TTL-based DLQ store in v1.0.
+
+---
+
+## 10. Stale Run Reaper
+
+A Celery beat task (`reap_stale_runs`) runs on schedule and marks any `RUNNING` execution that started more than 15 minutes ago as `FAILED`:
+
+```python
+# Runs every N seconds via Celery Beat
+threshold = datetime.now(timezone.utc) - timedelta(minutes=15)
+stale_runs = await execution_repo.list_stale_running(before=threshold)
+for run in stale_runs:
+    await StateMachine.transition_run(repo, run.tenant_id, run.run_id, RunStatus.FAILED)
+```

@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useVerifyEmail } from '@/api/auth'
 
-export default function VerifyEmailPage() {
+function VerifyEmailContent() {
   const params = useSearchParams()
   const token = params.get('token') ?? ''
   const mutation = useVerifyEmail()
@@ -20,11 +20,9 @@ export default function VerifyEmailPage() {
   if (!token) {
     return <p className="text-sm text-muted-foreground">No token provided.</p>
   }
-
   if (mutation.isPending) {
     return <p className="text-sm text-muted-foreground">Verifying…</p>
   }
-
   if (mutation.isError) {
     return (
       <div className="space-y-3">
@@ -33,11 +31,18 @@ export default function VerifyEmailPage() {
       </div>
     )
   }
-
   return (
     <div className="space-y-3">
       <p className="text-sm font-medium">Email verified ✓</p>
       <Link href="/login" className="text-sm hover:underline">Sign in to continue</Link>
     </div>
+  )
+}
+
+export default function VerifyEmailPage() {
+  return (
+    <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>
+      <VerifyEmailContent />
+    </Suspense>
   )
 }

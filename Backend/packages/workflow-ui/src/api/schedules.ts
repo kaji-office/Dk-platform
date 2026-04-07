@@ -1,5 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Schedules API — cron-based workflow scheduling
+// Schedules API — actual routes from openapi.yaml:
+//   GET  /api/v1/workflows/{id}/schedules     → { schedules: [] }
+//   POST /api/v1/workflows/{id}/schedules     → create
+//   PATCH/DELETE /api/v1/schedules/{id}       → update/delete
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -8,21 +11,20 @@ import type { WorkflowSchedule, ScheduleCreateRequest, ApiResponse } from '@/typ
 
 export const scheduleKeys = {
   all: ['schedules'] as const,
-  list: () => [...scheduleKeys.all, 'list'] as const,
-  detail: (id: string) => [...scheduleKeys.all, 'detail', id] as const,
   byWorkflow: (workflowId: string) => [...scheduleKeys.all, 'workflow', workflowId] as const,
+  detail: (id: string) => [...scheduleKeys.all, 'detail', id] as const,
 }
 
-export function useSchedules() {
+export function useWorkflowSchedules(workflowId: string) {
   return useQuery({
-    queryKey: scheduleKeys.list(),
+    queryKey: scheduleKeys.byWorkflow(workflowId),
     queryFn: async () => {
-      // Backend returns { schedules: WorkflowSchedule[] }
-      const { data } = await apiClient.get<{ schedules: WorkflowSchedule[] }>(
-        '/api/v1/schedules',
+      const { data } = await apiClient.get<ApiResponse<{ schedules: WorkflowSchedule[] }>>(
+        `/api/v1/workflows/${workflowId}/schedules`,
       )
-      return data.schedules ?? []
+      return data.data.schedules
     },
+    enabled: Boolean(workflowId),
   })
 }
 
@@ -37,7 +39,7 @@ export function useCreateSchedule(workflowId: string) {
       return data.data
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: scheduleKeys.list() })
+      qc.invalidateQueries({ queryKey: scheduleKeys.byWorkflow(workflowId) })
     },
   })
 }
@@ -55,7 +57,7 @@ export function useUpdateSchedule() {
       )
       return data.data
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: scheduleKeys.list() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: scheduleKeys.all }),
   })
 }
 
@@ -65,6 +67,6 @@ export function useDeleteSchedule() {
     mutationFn: async (id: string) => {
       await apiClient.delete(`/api/v1/schedules/${id}`)
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: scheduleKeys.list() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: scheduleKeys.all }),
   })
 }

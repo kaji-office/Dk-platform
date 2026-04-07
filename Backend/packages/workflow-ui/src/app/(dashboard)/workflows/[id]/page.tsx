@@ -23,7 +23,8 @@ export default function WorkflowEditorPage() {
   // Load workflow definition into canvas on mount
   useEffect(() => {
     if (workflow) {
-      loadFromDefinition(workflow.definition, workflow.id)
+      // Workflow has flat nodes/edges (no definition wrapper)
+      loadFromDefinition(workflow, workflow.id)
       setWorkflowMeta(workflow.id, workflow.name)
     }
   }, [workflow, loadFromDefinition, setWorkflowMeta])

@@ -1,6 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Webhooks API — inbound webhook management
-// Endpoints: docs/frontend/handover.md §2 "Inbound Webhooks" table
+// Webhooks API — actual routes from openapi.yaml:
+//   GET  /api/v1/webhooks                    → { webhooks: [] }
+//   POST /api/v1/webhooks                    → create (returns secret once)
+//   GET  /api/v1/webhooks/{id}               → detail
+//   PATCH/DELETE /api/v1/webhooks/{id}       → update/delete
+//   POST /api/v1/webhooks/inbound/{workflow_id} → external trigger (not called from UI)
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -17,10 +21,10 @@ export function useInboundWebhooks() {
   return useQuery({
     queryKey: webhookKeys.list(),
     queryFn: async () => {
-      const { data } = await apiClient.get<ApiResponse<InboundWebhook[]>>(
-        '/api/v1/webhooks/inbound',
+      const { data } = await apiClient.get<ApiResponse<{ webhooks: InboundWebhook[] }>>(
+        '/api/v1/webhooks',
       )
-      return data.data
+      return data.data.webhooks
     },
   })
 }
@@ -30,7 +34,7 @@ export function useInboundWebhook(id: string) {
     queryKey: webhookKeys.detail(id),
     queryFn: async () => {
       const { data } = await apiClient.get<ApiResponse<InboundWebhook>>(
-        `/api/v1/webhooks/inbound/${id}`,
+        `/api/v1/webhooks/${id}`,
       )
       return data.data
     },
@@ -38,14 +42,14 @@ export function useInboundWebhook(id: string) {
   })
 }
 
-// ── Create — webhook_secret is returned ONCE and must be stored ───────────────
+// ── Create — `secret` is returned ONCE and must be stored ────────────────────
 
 export function useCreateInboundWebhook() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (body: InboundWebhookCreate) => {
       const { data } = await apiClient.post<ApiResponse<InboundWebhook>>(
-        '/api/v1/webhooks/inbound',
+        '/api/v1/webhooks',
         body,
       )
       return data.data
@@ -59,7 +63,7 @@ export function useUpdateInboundWebhook() {
   return useMutation({
     mutationFn: async ({ id, ...body }: Partial<InboundWebhookCreate> & { id: string }) => {
       const { data } = await apiClient.patch<ApiResponse<InboundWebhook>>(
-        `/api/v1/webhooks/inbound/${id}`,
+        `/api/v1/webhooks/${id}`,
         body,
       )
       return data.data
@@ -75,7 +79,7 @@ export function useDeleteInboundWebhook() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: async (id: string) => {
-      await apiClient.delete(`/api/v1/webhooks/inbound/${id}`)
+      await apiClient.delete(`/api/v1/webhooks/${id}`)
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: webhookKeys.list() }),
   })

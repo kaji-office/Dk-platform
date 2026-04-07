@@ -29,6 +29,8 @@ There are **17 node types** across 4 categories plus a trigger group.
 
 ## 3. Node Type Registry
 
+> **As-built naming:** The actual `NodeType` enum uses **PascalCase strings ending in `Node`**, not UPPERCASE. When sending node types in API requests use e.g. `"ManualTriggerNode"`, `"TemplatingNode"`, `"OutputNode"`, `"AINode"`, `"APINode"`, `"LogicNode"`, `"TransformNode"`. Sending snake_case or UPPERCASE values returns HTTP 422. See `docs/api/openapi.json` for the exhaustive enum list.
+
 The `NodeTypeRegistry` is a singleton initialized at application startup. It maps `NodeType` enum values to their implementing class instances.
 
 ```python
@@ -388,14 +390,25 @@ Transforms and formats data using Jinja2 templates. Combines multiple node outpu
 }
 ```
 
-**Example template:**
+**Edge `target_port` semantics — critical:**
+
+| `target_port` value | Effect on template context |
+|---|---|
+| `"default"` | Upstream output dict is **spread** as top-level variables. `{{ payload.name }}` works directly. |
+| `"input"` | Upstream output is **nested** under `inputs["input"]`. Template must use `{{ input.payload.name }}`. |
+
+Use `target_port="default"` for `TemplatingNode` edges to keep template variables flat.
+
+**ManualTriggerNode output wrapping:** `ManualTriggerNode` wraps its `input_data` as `{"payload": {...}}`. With `target_port="default"`, templates access values as `{{ payload.field }}`.
+
+**Example template (ManualTriggerNode → TemplatingNode, both edges `target_port="default"`):**
 ```jinja2
-Hello {{ variables.user_name }},
+Hello {{ payload.user_name }},
 
 Here is your weekly report:
-{{ variables.summary }}
+{{ payload.summary }}
 
-Generated on: {{ variables.date }}
+Generated on: {{ payload.date }}
 ```
 
 ---

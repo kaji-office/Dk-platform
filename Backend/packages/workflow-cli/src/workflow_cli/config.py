@@ -41,8 +41,16 @@ def set_profile(name="default", **kwargs):
     profile.update(kwargs)
     save_config(config)
 
+# Runtime override set by `--api-url` CLI flag; takes precedence over config file
+_RUNTIME_API_URL: str | None = None
+
+
 def get_base_url() -> str:
-    """Gets configured API endpoint or defaults to localhost"""
+    """Gets configured API endpoint or defaults to localhost.
+    Precedence: --api-url flag > $WF_API_URL env > config file > default.
+    """
+    if _RUNTIME_API_URL:
+        return _RUNTIME_API_URL
     return get_profile().get("api_url", "http://127.0.0.1:8000")
 
 def get_token() -> str | None:

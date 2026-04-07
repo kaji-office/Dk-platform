@@ -1,5 +1,6 @@
 # Architecture Overview
 ## AI Workflow Builder Platform — System Architecture v1.0
+**Last updated:** 2026-04-07 — aligned with implemented codebase
 
 ---
 
@@ -28,13 +29,15 @@ A production-grade AI workflow automation platform that enables users to visuall
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  LAYER 3 — SDK CORE  ◄── THE PRODUCT                                        ║
 ║  workflow-engine (Python library — authored from scratch)                    ║
-║  Sub-Layer A: engine.config · engine.models                                  ║
-║  Sub-Layer B: engine.dag · engine.nodes · engine.validation                  ║
-║  Sub-Layer C: engine.executor · engine.state · engine.context                ║
-║  Sub-Layer D: engine.providers · engine.sandbox · engine.integrations        ║
-║               engine.cache · engine.versioning · engine.privacy              ║
-║               engine.events · engine.auth · engine.billing                   ║
-║               engine.health · engine.scheduler · engine.notifications        ║
+║  Sub-Layer A: engine.config · engine.models · engine.errors · engine.ports   ║
+║  Sub-Layer B: engine.graph · engine.nodes (17 types + registry)              ║
+║  Sub-Layer C: engine.execution (orchestrator · state_machine · context ·     ║
+║               retry_timeout · pii_scanner)                                   ║
+║  Sub-Layer D: engine.chat · engine.providers · engine.sandbox                ║
+║               engine.integrations · engine.cache · engine.auth               ║
+║               engine.billing · engine.storage · engine.privacy               ║
+║               engine.events · engine.observability · engine.scheduler        ║
+║               engine.notifications · engine.health · engine.versioning       ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║  LAYER 2 — MESSAGE BUS & ASYNC TRANSPORT                                     ║
 ║  ElastiCache Redis 7 (Celery broker · pub/sub · rate limits · context store) ║
@@ -87,13 +90,14 @@ workflow-api (FastAPI)       Thin HTTP shell — validates JWT, delegates to SDK
 workflow-engine (SDK)        Validates, versions, parses DAG
        │ dispatches via Redis/Celery
        ▼
-workflow-worker (Celery)     Thin task shell — calls RunOrchestrator
+workflow-worker (Celery)     Thin task shell — builds RunOrchestrator, calls .run()
        │ imports SDK
        ▼
-workflow-engine (SDK)        Executes nodes in isolation tiers
-       │
+workflow-engine (SDK)        DAG traversal via asyncio.gather() (one task per layer)
+       │                     CodeExecutionNode: RestrictedPython sandbox (Tier 1)
        ▼
-Isolated Execution           Tier 0-3 based on node type
+Isolated Execution           Tier 0 (direct) · Tier 1 (RestrictedPython)
+                             Tier 2 (gVisor) · Tier 3 (Firecracker) — planned
        │
        ▼
 LLM APIs / External APIs / Databases
@@ -107,16 +111,18 @@ LLM APIs / External APIs / Databases
 All CRUD operations, workflow saves, execution triggers. Every request authenticated via JWT Bearer or `X-API-Key` header. Structured JSON responses. SDK `ValidationError` maps to HTTP 422.
 
 ### WebSocket (Real-time)
-`WS /api/v2/ws/runs/{run_id}` — SDK EventBus publishes to Redis `ws:run:{id}`. WebSocketHub subscribes per-connection and fans out typed events to the browser. Heartbeat every 30s.
+`WS /api/v1/ws/executions/{run_id}` — WebSocket hub subscribes to Redis PubSub channel `run:{run_id}:events` and fans out typed events (`node_state`, `run_complete`, `run_waiting_human`) to the browser. Auth via `?token=<jwt>` query param (browsers cannot set Authorization headers on WS connections).
 
 ### Celery/Redis Queue (Async)
-`orchestrate_run.delay(run_id, definition)` fires after API creates `ExecutionRun`. Three queues:
-- `default` — orchestration, cleanup
+`execute_workflow.delay(run_id, tenant_id, workflow_id)` fires after API creates `ExecutionRun`. Five queues:
+- `default` — workflow execution, cleanup
 - `ai-heavy` — LLM-intensive node executions
 - `critical` — webhook triggers, human node callbacks
+- `scheduled` — cron-triggered workflow dispatch (beat fires every 30s)
+- `DLQ` — dead-letter queue for exhausted retries
 
-### SSE (Log Streaming)
-`GET /api/v2/logs/stream?run_id=X` — Server-Sent Events for log tailing in the Observability page.
+### Chat WebSocket
+`WS /api/v1/chat/sessions/ws/chat/{session_id}` — Lightweight phase-signal streaming during AI workflow creation. Auth via `?token=<jwt>`. Rich payload (clarification questions, WorkflowDefinition) always fetched via REST — not sent over WS.
 
 ---
 
@@ -128,7 +134,7 @@ All CRUD operations, workflow saves, execution triggers. Every request authentic
 | Domain Models | Pydantic | v2.x |
 | HTTP Client | httpx | 0.27+ |
 | MongoDB Driver | motor | 3.x |
-| Redis Client | aioredis | 2.x |
+| Redis Client | redis[asyncio] | 5.x |
 | PostgreSQL Driver | asyncpg + pgvector | 0.29+ |
 | API Framework | FastAPI | 0.111+ |
 | Task Queue | Celery | 5.x |

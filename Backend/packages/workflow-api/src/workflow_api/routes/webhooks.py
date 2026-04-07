@@ -11,6 +11,7 @@ webhooks_router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 class CreateWebhookRequest(BaseModel):
     workflow_id: str
     name: str
+    endpoint_url: str
     events: list[str] = ["execution.completed"]
     secret: str | None = None
 

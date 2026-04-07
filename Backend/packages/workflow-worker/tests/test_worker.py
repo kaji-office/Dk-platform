@@ -31,12 +31,18 @@ def mock_sdk(monkeypatch):
 
     audit = MagicMock()
     audit.create = AsyncMock(return_value=True)
+    audit.write = AsyncMock(return_value=True)
+
+    scheduler_repo = MagicMock()
+    scheduler_repo.get_due_schedules = AsyncMock(return_value=[])
 
     sdk = {
         "execution_repo": execution_repo,
         "workflow_repo": workflow_repo,
         "orchestrator": orchestrator,
-        "audit": audit
+        "audit": audit,
+        "redis_client": None,
+        "scheduler": scheduler_repo,
     }
 
     # Intercept run_async to evaluate mocks easily
@@ -46,11 +52,21 @@ def mock_sdk(monkeypatch):
             return asyncio.run(coro)
         return coro
     monkeypatch.setattr(tasks, "run_async", fake_run_async)
-    
+
     async def mock_get_engine():
         return sdk
 
     monkeypatch.setattr(tasks, "get_engine", mock_get_engine)
+
+    # Bypass build_orchestrator so tests can control orchestrator.run side effects
+    monkeypatch.setattr(tasks, "build_orchestrator", lambda s, cfg: orchestrator)
+
+    # Bypass get_tenant_config — no real DB in unit tests
+    from workflow_engine.models.tenant import TenantConfig
+    async def mock_get_tenant_config(s, tid):
+        return TenantConfig(tenant_id=tid)
+    monkeypatch.setattr(tasks, "get_tenant_config", mock_get_tenant_config)
+
     return sdk
 
 
@@ -108,10 +124,10 @@ class TestDeadLetterQueue:
 
     def test_handle_dlq_logs_to_audit(self, mock_sdk):
         tasks.handle_dlq("test_task", ["arg1"], {"kwarg": "v"})
-        
-        mock_sdk["audit"].create.assert_called_once()
-        args, kwargs = mock_sdk["audit"].create.call_args
-        assert args[1] == "task.failed"
-        payload = args[2]
+
+        mock_sdk["audit"].write.assert_called_once()
+        call_kwargs = mock_sdk["audit"].write.call_args.kwargs
+        assert call_kwargs["event_type"] == "task.failed"
+        payload = call_kwargs["detail"]
         assert payload["task"] == "test_task"
         assert payload["args"] == ["arg1"]
